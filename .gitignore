@@ -1,0 +1,5 @@
+build/
+*.o
+*.out
+testing/helloworld
+.codegraph/
