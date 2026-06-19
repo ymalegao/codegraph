@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Specification: `design_spec.md`
-- Current milestone completed in this handoff: Step 2, Storage
+- Current milestone completed in this handoff: Step 3, Scanner Tier 0
 - Build system: CMake + Ninja
 - Executable target: `codegraph`
 
@@ -73,6 +73,58 @@ Step 2 intentionally does not add:
 - MCP
 - benchmark commands
 
+### Step 3: Scanner Tier 0
+
+Implemented in:
+
+- `src/scanner.h`
+- `src/scanner.cpp`
+- `src/storage.h`
+- `src/storage.cpp`
+- `src/main.cpp`
+- `CMakeLists.txt`
+
+Added:
+
+- Recursive repo walk with default ignores:
+  - `.git/**`
+  - `build/**`
+  - `cmake-build-*/**`
+  - `node_modules/**`
+  - `**/__pycache__/**`
+  - `third_party/**`
+  - `generated/**`
+- C++ file detection for `.cpp`, `.cc`, `.cxx`, `.h`, and `.hpp`.
+- xxHash64 file content hashes stored as lowercase 16-character hex strings.
+- Line table construction and little-endian `uint32_t` blob packing.
+- Git branch and HEAD commit capture during scans.
+- Upserts into `files`.
+- Upserts into `line_tables`.
+- Unchanged-file detection by stored content hash.
+- CLI command: `./build/codegraph scan`
+  - Writes to `.codegraph/graph.sqlite`.
+  - Creates the `.codegraph` directory if needed.
+- Manual smoke command: `./build/codegraph test-scan`
+  - Uses `build/codegraph-test-scan.sqlite`.
+  - Verifies `testing/sample.cpp` is scanned.
+  - Verifies `testing/sample.py` is not scanned.
+  - Verifies line table offsets round-trip.
+  - Verifies a second scan detects unchanged files.
+  - Verifies `symbols` remains empty.
+
+Step 3 intentionally does not add:
+
+- tree-sitter symbol extraction
+- source graph nodes or edges
+- imports
+- FTS symbol population from scanner output
+- op log
+- materializer
+- memory reads
+- CSR graph
+- MCP
+- benchmark commands
+
 ## Verification commands
 
 Run from the repo root:
@@ -81,6 +133,7 @@ Run from the repo root:
 cmake --build build
 ./build/codegraph test-core
 ./build/codegraph test-storage
+./build/codegraph test-scan
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -89,17 +142,17 @@ cmake --build build
 
 ## Next milestone
 
-Step 3: Scanner, tier 0.
+Step 4: Tree-sitter C++ extraction.
 
 Scope from the spec:
 
-- Walk the repo.
-- Apply configured/default ignores.
-- Detect C++ files by extension.
-- Hash file bytes with xxHash64.
-- Build and store line tables.
-- Read git branch and HEAD commit.
-- Fill the `files` and `line_tables` tables.
-- Add minimal tests/smoke checks proving `scan` fills `files` and line table offsets round-trip correctly.
+- Parse indexed C++ files with tree-sitter-cpp.
+- Extract expected symbols from a known file.
+- Store symbol rows with complete spans.
+- Store symbol source span hashes.
+- Add `File -> Symbol` and nested `Symbol -> Symbol` `Contains` edges.
+- Add C++ include/import extraction as `Imports` edges only.
+- Populate `fts_symbols`.
+- Add minimal tests proving extracted spans match source exactly.
 
-Do not implement tree-sitter symbol extraction until Step 4.
+Do not implement calls/references. Do not implement Python indexing.

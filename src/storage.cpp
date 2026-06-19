@@ -1,5 +1,6 @@
 #include "storage.h"
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -264,6 +265,36 @@ int64_t Storage::query_int(std::string_view sql) const {
     const int64_t value = sqlite3_column_int64(stmt, 0);
     sqlite3_finalize(stmt);
     return value;
+}
+
+std::vector<uint8_t> Storage::query_blob(std::string_view sql) const {
+    sqlite3_stmt* stmt = nullptr;
+    const std::string query(sql);
+    const int prepare_rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
+    if (prepare_rc != SQLITE_OK) {
+        throw std::runtime_error(sqlite_message(db_, "failed to prepare sqlite query"));
+    }
+
+    const int step_rc = sqlite3_step(stmt);
+    if (step_rc != SQLITE_ROW) {
+        const std::string message = sqlite_message(db_, "sqlite query returned no row");
+        sqlite3_finalize(stmt);
+        throw std::runtime_error(message);
+    }
+
+    const auto* data = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 0));
+    const int bytes = sqlite3_column_bytes(stmt, 0);
+    std::vector<uint8_t> result;
+    if (data != nullptr && bytes > 0) {
+        result.assign(data, data + bytes);
+    }
+
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+sqlite3* Storage::handle() const {
+    return db_;
 }
 
 }  // namespace codegraph

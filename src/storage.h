@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string_view>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -22,6 +24,8 @@ public:
     void execute(std::string_view sql);
     bool object_exists(std::string_view type, std::string_view name) const;
     int64_t query_int(std::string_view sql) const;
+    std::vector<uint8_t> query_blob(std::string_view sql) const;
+    sqlite3* handle() const;
 
 private:
     sqlite3* db_ = nullptr;

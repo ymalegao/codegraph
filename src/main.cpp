@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core.h"
+#include "scanner.h"
 #include "storage.h"
 
 #include <nlohmann/json.hpp>
@@ -436,14 +437,111 @@ int command_test_storage() {
     return 0;
 }
 
+int command_scan() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+
+    std::filesystem::create_directories(db_path.parent_path());
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    const codegraph::ScanResult result = codegraph::scan_repository(
+        storage,
+        codegraph::ScanOptions{repo_root}
+    );
+
+    std::cout << "scan: ok\n";
+    std::cout << "repo: " << repo_root.generic_string() << "\n";
+    std::cout << "db: " << db_path.generic_string() << "\n";
+    std::cout << "branch: " << result.branch << "\n";
+    std::cout << "commit: " << result.commit_hash << "\n";
+    std::cout << "files_seen: " << result.files_seen << "\n";
+    std::cout << "files_indexed: " << result.files_indexed << "\n";
+    std::cout << "files_unchanged: " << result.files_unchanged << "\n";
+    std::cout << "bytes_indexed: " << result.bytes_indexed << "\n";
+    return 0;
+}
+
+int command_test_scan() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-scan.sqlite";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+
+    codegraph::ScanResult first_result;
+    codegraph::ScanResult second_result;
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+
+        first_result = codegraph::scan_repository(storage, codegraph::ScanOptions{repo_root});
+        require(first_result.files_seen > 0, "scanner did not see any C++ files");
+        require(first_result.files_indexed > 0, "scanner did not index any C++ files");
+        require(!first_result.branch.empty(), "scanner did not capture git branch");
+        require(first_result.commit_hash.size() == 40U, "scanner did not capture git HEAD hash");
+
+        require(
+            storage.query_int("SELECT COUNT(*) FROM files WHERE path = 'testing/sample.cpp';") == 1,
+            "scanner did not store testing/sample.cpp"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM files WHERE path = 'testing/sample.py';") == 0,
+            "scanner stored Python file during C++ scanner milestone"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM line_tables WHERE file_id = "
+                              "(SELECT file_id FROM files WHERE path = 'testing/sample.cpp');") == 1,
+            "scanner did not store line table for testing/sample.cpp"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols;") == 0,
+            "scanner populated symbols before tree-sitter extraction milestone"
+        );
+
+        const std::vector<uint8_t> stored_line_table = storage.query_blob(
+            "SELECT offsets_blob FROM line_tables WHERE file_id = "
+            "(SELECT file_id FROM files WHERE path = 'testing/sample.cpp');"
+        );
+        const std::string sample = read_file("testing/sample.cpp");
+        const std::vector<uint32_t> expected_offsets = codegraph::build_line_offsets(sample);
+        const std::vector<uint32_t> actual_offsets = codegraph::unpack_line_offsets(stored_line_table);
+        require(actual_offsets == expected_offsets, "line table did not round-trip for testing/sample.cpp");
+
+        const size_t namespace_offset = sample.find("namespace demo");
+        require(namespace_offset != std::string::npos, "test fixture is missing namespace demo");
+        require(actual_offsets.size() >= 3U, "line table has too few lines");
+        require(actual_offsets[2] == namespace_offset, "line 3 offset mismatch for testing/sample.cpp");
+
+        second_result = codegraph::scan_repository(storage, codegraph::ScanOptions{repo_root});
+        require(second_result.files_unchanged == first_result.files_seen, "second scan did not detect unchanged files");
+        require(second_result.files_indexed == 0, "second scan rewrote unchanged files");
+    }
+
+    std::filesystem::remove(db_path, ignored);
+
+    std::cout << "scan files: ok\n";
+    std::cout << "line tables: ok\n";
+    std::cout << "scan unchanged: ok\n";
+    std::cout << "branch: " << first_result.branch << "\n";
+    std::cout << "commit: " << first_result.commit_hash << "\n";
+    std::cout << "files_seen: " << first_result.files_seen << "\n";
+    std::cout << "files_indexed: " << first_result.files_indexed << "\n";
+    std::cout << "files_unchanged_second_scan: " << second_result.files_unchanged << "\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
         << "  codegraph --version\n"
         << "  codegraph doctor-deps\n"
+        << "  codegraph scan\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
-        << "  codegraph test-storage\n";
+        << "  codegraph test-storage\n"
+        << "  codegraph test-scan\n";
 }
 
 }  // namespace
@@ -458,6 +556,10 @@ int main(int argc, char** argv) {
             return command_doctor_deps();
         }
 
+        if (argc == 2 && std::strcmp(argv[1], "scan") == 0) {
+            return command_scan();
+        }
+
         if (argc == 3 && std::strcmp(argv[1], "parse-smoke") == 0) {
             return command_parse_smoke(argv[2]);
         }
@@ -468,6 +570,10 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-storage") == 0) {
             return command_test_storage();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-scan") == 0) {
+            return command_test_scan();
         }
 
         print_usage();

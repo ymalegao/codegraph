@@ -89,6 +89,26 @@ target_compile_options(codegraph_storage PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_scanner
+  src/scanner.cpp
+)
+
+target_include_directories(codegraph_scanner PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_scanner PUBLIC
+  codegraph_sanitizers
+  codegraph_storage
+  PkgConfig::XXHASH
+)
+
+target_compile_options(codegraph_scanner PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_executable(codegraph
   src/main.cpp
 )
@@ -96,6 +116,7 @@ add_executable(codegraph
 target_link_libraries(codegraph PRIVATE
   codegraph_core
   codegraph_storage
+  codegraph_scanner
   codegraph_sanitizers
   cpp-tree-sitter
   tree-sitter-cpp
