@@ -3,13 +3,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "core.h"
-#include "cpp_indexer.h"
+#include "cpp_frontend.h"
+#include "indexer.h"
+#include "read_tools.h"
 #include "scanner.h"
 #include "storage.h"
 
@@ -76,6 +79,29 @@ std::string read_file(const std::string& path) {
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
+}
+
+void write_file(const std::filesystem::path& path, std::string_view contents) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        throw std::runtime_error("failed to write file: " + path.string());
+    }
+    output << contents;
+}
+
+struct RemoveOnExit {
+    std::filesystem::path path;
+
+    ~RemoveOnExit() {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+};
+
+codegraph::FrontendRegistry make_frontend_registry() {
+    codegraph::FrontendRegistry registry;
+    registry.add(std::make_unique<codegraph::CppFrontend>());
+    return registry;
 }
 
 void sqlite_exec(sqlite3* db, const char* sql) {
@@ -441,6 +467,7 @@ int command_test_storage() {
 int command_scan() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    codegraph::FrontendRegistry registry = make_frontend_registry();
 
     std::filesystem::create_directories(db_path.parent_path());
     codegraph::Storage storage(db_path);
@@ -448,6 +475,7 @@ int command_scan() {
 
     const codegraph::ScanResult result = codegraph::scan_repository(
         storage,
+        registry,
         codegraph::ScanOptions{repo_root}
     );
 
@@ -459,6 +487,7 @@ int command_scan() {
     std::cout << "files_seen: " << result.files_seen << "\n";
     std::cout << "files_indexed: " << result.files_indexed << "\n";
     std::cout << "files_unchanged: " << result.files_unchanged << "\n";
+    std::cout << "files_pruned: " << result.files_pruned << "\n";
     std::cout << "bytes_indexed: " << result.bytes_indexed << "\n";
     return 0;
 }
@@ -466,6 +495,7 @@ int command_scan() {
 int command_index() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    codegraph::FrontendRegistry registry = make_frontend_registry();
 
     std::filesystem::create_directories(db_path.parent_path());
     codegraph::Storage storage(db_path);
@@ -473,10 +503,12 @@ int command_index() {
 
     const codegraph::ScanResult scan_result = codegraph::scan_repository(
         storage,
+        registry,
         codegraph::ScanOptions{repo_root}
     );
-    const codegraph::IndexResult index_result = codegraph::index_cpp_repository(
+    const codegraph::IndexResult index_result = codegraph::index_repository(
         storage,
+        registry,
         codegraph::IndexOptions{repo_root}
     );
 
@@ -486,10 +518,85 @@ int command_index() {
     std::cout << "scan_files_seen: " << scan_result.files_seen << "\n";
     std::cout << "scan_files_indexed: " << scan_result.files_indexed << "\n";
     std::cout << "scan_files_unchanged: " << scan_result.files_unchanged << "\n";
+    std::cout << "scan_files_pruned: " << scan_result.files_pruned << "\n";
     std::cout << "indexed_files: " << index_result.files_indexed << "\n";
+    std::cout << "index_files_pruned: " << index_result.files_pruned << "\n";
     std::cout << "symbols_indexed: " << index_result.symbols_indexed << "\n";
     std::cout << "contains_edges: " << index_result.contains_edges << "\n";
     std::cout << "imports_edges: " << index_result.imports_edges << "\n";
+    return 0;
+}
+
+int command_find_symbol(const std::string& query) {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    const std::vector<codegraph::SymbolMatch> matches = codegraph::find_symbols(storage, query);
+    for (const codegraph::SymbolMatch& match : matches) {
+        std::cout << match.qualified_name
+                  << "\t" << match.kind
+                  << "\t" << match.path << ":" << match.start_line << "-" << match.end_line
+                  << "\t" << "symbol_id=" << match.symbol_id
+                  << "\n";
+    }
+    return 0;
+}
+
+int command_read_symbol(const std::string& query) {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    const codegraph::ReadSymbolResult result = codegraph::read_symbol_verified(
+        storage,
+        registry,
+        codegraph::IndexOptions{repo_root},
+        query
+    );
+
+    std::cout << "status: " << codegraph::read_status_name(result.status) << "\n";
+    if (!result.message.empty()) {
+        std::cout << "message: " << result.message << "\n";
+    }
+    if (result.status == codegraph::ReadStatus::NotFound) {
+        return 1;
+    }
+    if (result.status == codegraph::ReadStatus::Gone) {
+        std::cout << "qualified_name: " << result.symbol.qualified_name << "\n";
+        std::cout << "path: " << result.symbol.path << "\n";
+        return 0;
+    }
+
+    std::cout << "qualified_name: " << result.symbol.qualified_name << "\n";
+    std::cout << "kind: " << result.symbol.kind << "\n";
+    std::cout << "path: " << result.symbol.path << "\n";
+    std::cout << "lines: " << result.symbol.start_line << "-" << result.symbol.end_line << "\n";
+    std::cout << "bytes: " << result.symbol.start_byte << "-" << result.symbol.end_byte << "\n";
+    std::cout << "body:\n" << result.body << "\n";
+    return 0;
+}
+
+int command_read_file(const std::vector<std::string>& args) {
+    if (args.size() != 5U || args[1] != "--start" || args[3] != "--end") {
+        throw std::runtime_error("usage: codegraph read-file <path> --start N --end M");
+    }
+
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const uint32_t start_line = static_cast<uint32_t>(std::stoul(args[2]));
+    const uint32_t end_line = static_cast<uint32_t>(std::stoul(args[4]));
+    const codegraph::FileRangeResult result =
+        codegraph::read_file_range(repo_root, args[0], start_line, end_line);
+
+    std::cout << "path: " << result.path << "\n";
+    std::cout << "lines: " << result.start_line << "-" << result.end_line << "\n";
+    std::cout << "current_hash: " << result.content_hash << "\n";
+    std::cout << "text:\n" << result.text;
     return 0;
 }
 
@@ -503,11 +610,12 @@ int command_test_scan() {
 
     codegraph::ScanResult first_result;
     codegraph::ScanResult second_result;
+    codegraph::FrontendRegistry registry = make_frontend_registry();
     {
         codegraph::Storage storage(db_path);
         storage.initialize_schema();
 
-        first_result = codegraph::scan_repository(storage, codegraph::ScanOptions{repo_root});
+        first_result = codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
         require(first_result.files_seen > 0, "scanner did not see any C++ files");
         require(first_result.files_indexed > 0, "scanner did not index any C++ files");
         require(!first_result.branch.empty(), "scanner did not capture git branch");
@@ -545,7 +653,7 @@ int command_test_scan() {
         require(actual_offsets.size() >= 3U, "line table has too few lines");
         require(actual_offsets[2] == namespace_offset, "line 3 offset mismatch for testing/sample.cpp");
 
-        second_result = codegraph::scan_repository(storage, codegraph::ScanOptions{repo_root});
+        second_result = codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
         require(second_result.files_unchanged == first_result.files_seen, "second scan did not detect unchanged files");
         require(second_result.files_indexed == 0, "second scan rewrote unchanged files");
     }
@@ -560,6 +668,7 @@ int command_test_scan() {
     std::cout << "files_seen: " << first_result.files_seen << "\n";
     std::cout << "files_indexed: " << first_result.files_indexed << "\n";
     std::cout << "files_unchanged_second_scan: " << second_result.files_unchanged << "\n";
+    std::cout << "files_pruned_second_scan: " << second_result.files_pruned << "\n";
     return 0;
 }
 
@@ -572,11 +681,12 @@ int command_test_index() {
     std::filesystem::remove(db_path, ignored);
 
     codegraph::IndexResult index_result;
+    codegraph::FrontendRegistry registry = make_frontend_registry();
     {
         codegraph::Storage storage(db_path);
         storage.initialize_schema();
-        (void)codegraph::scan_repository(storage, codegraph::ScanOptions{repo_root});
-        index_result = codegraph::index_cpp_repository(storage, codegraph::IndexOptions{repo_root});
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        index_result = codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
 
         require(index_result.files_indexed > 0, "indexer did not index any C++ files");
         require(index_result.symbols_indexed > 0, "indexer did not extract any symbols");
@@ -648,6 +758,42 @@ int command_test_index() {
                               "(SELECT file_id FROM files WHERE path = 'testing/sample.py');") == 0,
             "indexer extracted Python symbols during C++ milestone"
         );
+
+        const std::filesystem::path prune_file = repo_root / "testing" / "codegraph_prune_tmp.cpp";
+        RemoveOnExit remove_prune_file{prune_file};
+        write_file(
+            prune_file,
+            "namespace prune {\nint gone() {\n    return 7;\n}\n}\n"
+        );
+
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+        require(
+            storage.query_int("SELECT COUNT(*) FROM files WHERE path = 'testing/codegraph_prune_tmp.cpp';") == 1,
+            "prune regression fixture was not scanned"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'prune::gone';") == 1,
+            "prune regression fixture was not indexed"
+        );
+
+        std::filesystem::remove(prune_file, ignored);
+        const codegraph::ScanResult prune_result =
+            codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        require(prune_result.files_pruned >= 1, "scanner did not prune deleted file rows");
+        require(
+            storage.query_int("SELECT COUNT(*) FROM files WHERE path = 'testing/codegraph_prune_tmp.cpp';") == 0,
+            "scanner left stale file row after deletion"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'prune::gone';") == 0,
+            "scanner left stale symbols after deletion"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM fts_symbols WHERE fts_symbols MATCH 'gone';") == 0,
+            "scanner left stale FTS symbols after deletion"
+        );
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
     }
 
     std::filesystem::remove(db_path, ignored);
@@ -656,10 +802,119 @@ int command_test_index() {
     std::cout << "index spans: ok\n";
     std::cout << "index fts: ok\n";
     std::cout << "index edges: ok\n";
+    std::cout << "delete prune: ok\n";
     std::cout << "indexed_files: " << index_result.files_indexed << "\n";
+    std::cout << "index_files_pruned: " << index_result.files_pruned << "\n";
     std::cout << "symbols_indexed: " << index_result.symbols_indexed << "\n";
     std::cout << "contains_edges: " << index_result.contains_edges << "\n";
     std::cout << "imports_edges: " << index_result.imports_edges << "\n";
+    return 0;
+}
+
+int command_test_read() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-read.sqlite";
+    const std::filesystem::path read_file_path = repo_root / "testing" / "codegraph_read_tmp.cpp";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+    RemoveOnExit remove_read_file{read_file_path};
+
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    write_file(
+        read_file_path,
+        "namespace readstep {\n"
+        "int target() {\n"
+        "    return 1;\n"
+        "}\n"
+        "\n"
+        "int stay() {\n"
+        "    return 0;\n"
+        "}\n"
+        "}\n"
+    );
+
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+
+        const std::vector<codegraph::SymbolMatch> found =
+            codegraph::find_symbols(storage, "readstep::target");
+        require(found.size() == 1U, "find-symbol did not find readstep::target");
+
+        const codegraph::ReadSymbolResult initial = codegraph::read_symbol_verified(
+            storage,
+            registry,
+            codegraph::IndexOptions{repo_root},
+            "readstep::target"
+        );
+        require(initial.status == codegraph::ReadStatus::Ok, "initial read-symbol was not ok");
+        require(
+            initial.body == "int target() {\n    return 1;\n}",
+            "initial read-symbol returned the wrong body"
+        );
+
+        const codegraph::FileRangeResult range =
+            codegraph::read_file_range(repo_root, "testing/codegraph_read_tmp.cpp", 1, 2);
+        require(
+            range.text == "namespace readstep {\nint target() {\n",
+            "read-file returned the wrong exact range"
+        );
+
+        write_file(
+            read_file_path,
+            "namespace readstep {\n"
+            "int stay() {\n"
+            "    return 0;\n"
+            "}\n"
+            "\n"
+            "int target() {\n"
+            "    return 2;\n"
+            "}\n"
+            "}\n"
+        );
+
+        const codegraph::ReadSymbolResult moved = codegraph::read_symbol_verified(
+            storage,
+            registry,
+            codegraph::IndexOptions{repo_root},
+            "readstep::target"
+        );
+        require(moved.status == codegraph::ReadStatus::ReResolved, "moved symbol was not re-resolved");
+        require(
+            moved.body == "int target() {\n    return 2;\n}",
+            "re-resolved read-symbol returned the wrong body"
+        );
+        require(moved.symbol.start_line == 6U, "re-resolved symbol did not move to the expected line");
+
+        write_file(
+            read_file_path,
+            "namespace readstep {\n"
+            "int stay() {\n"
+            "    return 0;\n"
+            "}\n"
+            "}\n"
+        );
+
+        const codegraph::ReadSymbolResult deleted = codegraph::read_symbol_verified(
+            storage,
+            registry,
+            codegraph::IndexOptions{repo_root},
+            "readstep::target"
+        );
+        require(deleted.status == codegraph::ReadStatus::Gone, "deleted symbol did not report gone");
+    }
+
+    std::filesystem::remove(db_path, ignored);
+
+    std::cout << "find symbol: ok\n";
+    std::cout << "read symbol: ok\n";
+    std::cout << "read file range: ok\n";
+    std::cout << "verify before trust: ok\n";
+    std::cout << "deleted symbol: ok\n";
     return 0;
 }
 
@@ -670,11 +925,15 @@ void print_usage() {
         << "  codegraph doctor-deps\n"
         << "  codegraph scan\n"
         << "  codegraph index\n"
+        << "  codegraph find-symbol <name>\n"
+        << "  codegraph read-symbol <name>\n"
+        << "  codegraph read-file <path> --start N --end M\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
         << "  codegraph test-storage\n"
         << "  codegraph test-scan\n"
-        << "  codegraph test-index\n";
+        << "  codegraph test-index\n"
+        << "  codegraph test-read\n";
 }
 
 
@@ -698,6 +957,18 @@ int main(int argc, char** argv) {
             return command_index();
         }
 
+        if (argc == 3 && std::strcmp(argv[1], "find-symbol") == 0) {
+            return command_find_symbol(argv[2]);
+        }
+
+        if (argc == 3 && std::strcmp(argv[1], "read-symbol") == 0) {
+            return command_read_symbol(argv[2]);
+        }
+
+        if (argc == 7 && std::strcmp(argv[1], "read-file") == 0) {
+            return command_read_file({argv[2], argv[3], argv[4], argv[5], argv[6]});
+        }
+
         if (argc == 3 && std::strcmp(argv[1], "parse-smoke") == 0) {
             return command_parse_smoke(argv[2]);
         }
@@ -716,7 +987,11 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-index") == 0) {
             return command_test_index();
-            }
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-read") == 0) {
+            return command_test_read();
+        }
 
         print_usage();
         return 2;

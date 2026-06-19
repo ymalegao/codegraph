@@ -111,6 +111,43 @@ target_compile_options(codegraph_hash PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_frontend
+  src/frontend.cpp
+)
+
+target_include_directories(codegraph_frontend PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_frontend PUBLIC
+  codegraph_sanitizers
+)
+
+target_compile_options(codegraph_frontend PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
+add_library(codegraph_source_projection
+  src/source_projection.cpp
+)
+
+target_include_directories(codegraph_source_projection PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_source_projection PUBLIC
+  codegraph_sanitizers
+  codegraph_storage
+)
+
+target_compile_options(codegraph_source_projection PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_library(codegraph_scanner
   src/scanner.cpp
 )
@@ -121,7 +158,9 @@ target_include_directories(codegraph_scanner PUBLIC
 
 target_link_libraries(codegraph_scanner PUBLIC
   codegraph_sanitizers
+  codegraph_frontend
   codegraph_hash
+  codegraph_source_projection
   codegraph_storage
 )
 
@@ -131,24 +170,69 @@ target_compile_options(codegraph_scanner PRIVATE
   -Wpedantic
 )
 
-add_library(codegraph_cpp_indexer
-  src/cpp_indexer.cpp
+add_library(codegraph_indexer
+  src/indexer.cpp
 )
 
-target_include_directories(codegraph_cpp_indexer PUBLIC
+target_include_directories(codegraph_indexer PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(codegraph_cpp_indexer PUBLIC
+target_link_libraries(codegraph_indexer PUBLIC
   codegraph_sanitizers
   codegraph_core
+  codegraph_frontend
   codegraph_hash
+  codegraph_source_projection
   codegraph_storage
+)
+
+target_compile_options(codegraph_indexer PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
+add_library(codegraph_cpp_frontend
+  src/cpp_frontend.cpp
+)
+
+target_include_directories(codegraph_cpp_frontend PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_cpp_frontend PUBLIC
+  codegraph_sanitizers
+  codegraph_frontend
+  codegraph_hash
   cpp-tree-sitter
   tree-sitter-cpp
 )
 
-target_compile_options(codegraph_cpp_indexer PRIVATE
+target_compile_options(codegraph_cpp_frontend PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
+add_library(codegraph_read_tools
+  src/read_tools.cpp
+)
+
+target_include_directories(codegraph_read_tools PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_read_tools PUBLIC
+  codegraph_sanitizers
+  codegraph_frontend
+  codegraph_hash
+  codegraph_indexer
+  codegraph_scanner
+  codegraph_storage
+)
+
+target_compile_options(codegraph_read_tools PRIVATE
   -Wall
   -Wextra
   -Wpedantic
@@ -160,8 +244,12 @@ add_executable(codegraph
 
 target_link_libraries(codegraph PRIVATE
   codegraph_core
-  codegraph_cpp_indexer
+  codegraph_cpp_frontend
+  codegraph_frontend
   codegraph_hash
+  codegraph_indexer
+  codegraph_read_tools
+  codegraph_source_projection
   codegraph_storage
   codegraph_scanner
   codegraph_sanitizers

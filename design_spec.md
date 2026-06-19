@@ -349,31 +349,84 @@ Import/merge of an op log from elsewhere is just: append the lines, then `materi
 
 ---
 
-## 8. Scanner & tree-sitter extraction
+## 8. Scanner, language frontends, and extraction
+
+Keep the parser abstraction language-neutral. A language frontend owns grammar details and turns source bytes into a neutral `ExtractedFile`; the generic indexer owns all persistence and never names tree-sitter types, SQLite parser details, or grammar node-type strings.
+
+```cpp
+struct SymbolInfo {
+    std::string kind;            // shared vocabulary: function|method|class|struct|namespace|enum|field|other
+    std::string name;
+    std::string qualified_name;
+    std::string signature;
+    uint32_t start_line, end_line;
+    uint32_t start_byte, end_byte;
+    std::string content_hash;
+    int parent_index = -1;       // index into ExtractedFile.symbols, or -1 for file-level
+};
+
+struct IncludeInfo {
+    std::string target;          // import target as written
+};
+
+struct ExtractedFile {
+    std::vector<SymbolInfo> symbols;
+    std::vector<IncludeInfo> includes;
+};
+
+class LanguageFrontend {
+public:
+    virtual ~LanguageFrontend() = default;
+    virtual std::string_view language() const = 0;
+    virtual std::span<const std::string_view> extensions() const = 0;
+    virtual ExtractedFile extract(std::string_view source) const = 0;
+};
+```
+
+The pure virtual interface stays narrow: `language()`, `extensions()`, and `extract()`. Do not leak SQLite types, `TSNode`, tree-sitter parser handles, or grammar-specific node-type strings into these signatures. Adding a language should mean adding a new frontend and registering it, not editing the generic indexer.
 
 ```
 scan():
   read git branch + HEAD commit (shell out to `git`)
   walk repo, skip ignored globs and files > max_file_size_mb
   for each file:
-     read bytes; language by extension (.cpp/.cc/.cxx/.h/.hpp -> cpp)
+     choose language by FrontendRegistry extension ownership
+     read bytes
      content_hash = xxHash64(bytes)
-     if files.content_hash unchanged: skip parse
+     if files.content_hash unchanged: skip line-table rewrite
      else:
         build line-offset table (byte offset of each line start); store packed uint32[]
-        upsert files row; upsert File node
-        parse with tree-sitter-cpp
-        extract symbols (below); upsert symbols rows + Symbol nodes
-        compute each symbol's span content_hash = xxHash64(span bytes)
+        upsert files row
+  prune any registered-language files rows not seen in this scan:
+     delete line_tables row
+     delete symbols and Symbol nodes for that file
+     delete source Contains/Imports edges for the file and its symbols
+     delete the File node and files row
+     reset memory Affects edges that pointed at deleted source nodes back to unresolved
+  resolver_pass()
+```
+
+Indexing is generic:
+
+```
+index_repository(storage, registry):
+  scan() has already reconciled files with disk
+  for each frontend in registry:
+     load files WHERE language = frontend.language()
+     for each file:
+        if the file is missing anyway, prune its source projection and continue
+        extracted = frontend.extract(source_bytes)
+        delete the old source projection for that file
+        upsert File node
+        insert symbols rows + Symbol nodes from extracted.symbols
         add Contains edges (File->Symbol, and Symbol->Symbol for nesting)
-        add Imports edges from #include directives (to_ref = include target; resolve best-effort by path/basename, else pending)
-        refresh fts_symbols
+        add Imports edges from extracted.includes (to_ref = import target; unresolved initially)
   resolver_pass()
 ```
 
 Symbols to extract from C++ (tree-sitter node types): `function_definition`, method definitions inside `class_specifier`/`struct_specifier`, `class_specifier`, `struct_specifier`, `namespace_definition`, `enum_specifier`. For each: `name`, `qualified_name` (prefix with enclosing namespaces/classes), `signature` (raw parameter text is acceptable), exact start/end line and byte from the tree-sitter node range.
 
-Note: do **not** attempt to populate call/reference edges from tree-sitter — it cannot resolve them on C++. Only `Contains` and `Imports` are produced here.
+Only the C++ frontend should know these tree-sitter node types. Note: do **not** attempt to populate call/reference edges from tree-sitter — it cannot resolve them on C++. Only `Contains` and `Imports` are produced here.
 
 ---
 
@@ -385,13 +438,13 @@ read a symbol's span:
   if == stored files.content_hash:
        return the span bytes read at the stored byte offsets        # fast path
   else:
-       re-parse the file with tree-sitter
+       refresh source projection internally (scan + language frontend index, or an equivalent single-file refresh)
        find the symbol by qualified_name
        if found:  update its span (offsets + content_hash), set ReResolved flag, return fresh span
        if gone:   return "symbol no longer present", suggest find_symbol
 ```
 
-Never return cached span content when the file hash has changed. Re-resolve and update; do not ask the caller to re-read.
+Never return cached span content when the file hash has changed. Re-resolve and update before returning; do not ask the caller to re-read. A full scan+index refresh is acceptable for the early implementation. Later incremental work can replace it with a single-file refresh while preserving the same read contract.
 
 ---
 
@@ -458,8 +511,8 @@ Each step has a done-criterion. Do them in order.
 0. **Skeleton.** C++20 + CMake; link SQLite (FTS5 on), tree-sitter + tree-sitter-cpp, nlohmann/json, xxHash; shell out to `git`. *Done:* `codegraph --version` runs.
 1. **Core types + interner** (§5 subset). *Done:* interner intern/dedup/view tests pass; span packs/unpacks.
 2. **Storage** (§4). *Done:* fresh DB created with full schema; reopening is a no-op.
-3. **Scanner** (§8 Tier 0: walk, hash, line tables, git). *Done:* `scan` fills `files`; line table round-trips (offset of line N is correct).
-4. **Tree-sitter C++** (§8 extraction). *Done:* `index` extracts expected symbols from a known file; spans match the source exactly; `fts_symbols` populated.
+3. **Scanner** (§8 Tier 0: walk, hash, line tables, git, source prune). *Done:* `scan` fills `files`; line table round-trips (offset of line N is correct); deleting a file prunes stale source rows.
+4. **Language frontend + Tree-sitter C++** (§8 extraction). *Done:* `index` uses `LanguageFrontend`/`ExtractedFile`, extracts expected C++ symbols from a known file, spans match the source exactly, and `fts_symbols` is populated.
 5. **Exact reads + verify-before-trust** (§9, §10 read tools). *Done:* read a symbol; edit the file (move the function); re-read returns the *current* span, flagged ReResolved; deleted symbol reports "gone."
 6. **Op log + materializer** (§6, §7: `ADD_CORRECTION`, `ADD_DECISION`, resolution, pending edges). *Done:* `correct`/`remember` append ops; `materialize` builds rows; running it twice makes no duplicates; a correction affecting a not-yet-indexed path lands pending, then resolves after `scan`.
 7. **Memory reads** (§10 `get_memory_for_*` via reverse edges). *Done:* after a correction on `resdb/**`, `memory-for resdb/app/x.cc` shows it with reason; `bftsmart/**` shows the avoid rule.
@@ -475,11 +528,12 @@ Each step has a done-criterion. Do them in order.
 2. `read-file x.cpp --start 1 --end 20` → exact lines, no off-by-one.
 3. `find-symbol Foo::bar` → correct file + line range; `read-symbol` → complete body + hash status.
 4. Index, then edit the file so the function moves; `read-symbol` of the old symbol → hash mismatch detected → returns the current span flagged ReResolved. Delete the symbol → reports "no longer present."
-5. `correct --prefer resdb/** --avoid bftsmart/**` → `memory-for resdb/app/x.cc` shows the prefer rule with its reason; `memory-for bftsmart/y.h` shows the avoid rule.
-6. Record a correction that affects a path not yet indexed → its edge is pending → after `scan`, the edge resolves.
-7. Run `materialize` twice → no duplicate nodes/edges/memories.
-8. Append two separate op streams (simulating two machines) and `materialize` → both memories present, neither overwritten.
-9. `bench` meets the targets below.
+5. Index, then delete or rename a source file; the next `scan` prunes the old `files`, `line_tables`, `symbols`, source nodes, and source edges, and the next `index` completes without trying to read the missing path.
+6. `correct --prefer resdb/** --avoid bftsmart/**` → `memory-for resdb/app/x.cc` shows the prefer rule with its reason; `memory-for bftsmart/y.h` shows the avoid rule.
+7. Record a correction that affects a path not yet indexed → its edge is pending → after `scan`, the edge resolves.
+8. Run `materialize` twice → no duplicate nodes/edges/memories.
+9. Append two separate op streams (simulating two machines) and `materialize` → both memories present, neither overwritten.
+10. `bench` meets the targets below.
 
 ---
 

@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Specification: `design_spec.md`
-- Current milestone completed in this handoff: Step 4, Tree-sitter C++ extraction
+- Current milestone completed in this handoff: Step 5, Exact reads + verify-before-trust
 - Build system: CMake + Ninja
 - Executable target: `codegraph`
 
@@ -73,7 +73,7 @@ Step 2 intentionally does not add:
 - MCP
 - benchmark commands
 
-### Step 3: Scanner Tier 0
+### Step 3: Scanner Tier 0 + source pruning
 
 Implemented in:
 
@@ -107,6 +107,11 @@ Added:
 - Unchanged-file detection by stored content hash.
 - Shared SQLite statement/bind/check helpers for storage and scanner code.
 - Shared xxHash64 hex helper for file hashes and future symbol span hashes.
+- Scanner file ownership now comes from `FrontendRegistry` extension mappings instead of `is_cpp_path`.
+- A scan reconciles the SQLite source cache with disk:
+  - files for registered languages that are no longer seen are pruned
+  - stale `line_tables`, `symbols`, source nodes, and `contains`/`imports` edges are removed
+  - memory `affects` edges pointing at deleted source nodes are reset to unresolved for the later resolver pass
 - CLI command: `./build/codegraph scan`
   - Writes to `.codegraph/graph.sqlite`.
   - Creates the `.codegraph` directory if needed.
@@ -116,6 +121,7 @@ Added:
   - Verifies `testing/sample.py` is not scanned.
   - Verifies line table offsets round-trip.
   - Verifies a second scan detects unchanged files.
+  - Verifies no files are pruned on an unchanged second scan.
   - Verifies `symbols` remains empty.
 
 Step 3 intentionally does not add:
@@ -131,12 +137,19 @@ Step 3 intentionally does not add:
 - MCP
 - benchmark commands
 
-### Step 4: Tree-sitter C++ extraction
+### Step 4: Language frontend + Tree-sitter C++ extraction
 
 Implemented in:
 
-- `src/cpp_indexer.h`
-- `src/cpp_indexer.cpp`
+- `src/extraction.h`
+- `src/frontend.h`
+- `src/frontend.cpp`
+- `src/cpp_frontend.h`
+- `src/cpp_frontend.cpp`
+- `src/indexer.h`
+- `src/indexer.cpp`
+- `src/source_projection.h`
+- `src/source_projection.cpp`
 - `src/file_util.h`
 - `src/file_util.cpp`
 - `src/time_util.h`
@@ -146,10 +159,21 @@ Implemented in:
 
 Added:
 
-- C++ tree-sitter parser/extractor isolated in `cpp_indexer.cpp`.
+- Language-neutral extraction contract:
+  - `LanguageFrontend::language()`
+  - `LanguageFrontend::extensions()`
+  - `LanguageFrontend::extract() -> ExtractedFile`
+- Neutral extraction payloads:
+  - `ExtractedFile`
+  - `SymbolInfo`
+  - `IncludeInfo`
+- `FrontendRegistry` as the single source of truth for extension/language ownership.
+- C++ tree-sitter parser/extractor isolated in `cpp_frontend.cpp`.
+- Generic `index_repository` persistence in `indexer.cpp`; it does not include tree-sitter headers or grammar node-type strings.
+- Shared source projection cleanup for changed and deleted files.
 - CLI command: `./build/codegraph index`
   - Runs scan first.
-  - Parses scanned C++ files.
+  - Parses files through registered language frontends.
   - Writes to `.codegraph/graph.sqlite`.
 - Manual smoke command: `./build/codegraph test-index`
   - Uses `build/codegraph-test-index.sqlite`.
@@ -160,6 +184,7 @@ Added:
   - Verifies `Imports` edges are created for includes.
   - Verifies no edge kinds outside `contains` and `imports`.
   - Verifies Python files are not indexed.
+  - Verifies a deleted C++ file is pruned and a following index run does not fail on a stale path.
 - Symbol extraction for:
   - `function_definition`
   - methods inside classes/structs
@@ -187,13 +212,52 @@ Step 4 intentionally does not add:
 - Calls edges
 - References edges
 - Python indexing
-- exact read commands
 - verify-before-trust
 - op log
 - materializer
 - memory reads
 - CSR graph
 - MCP
+- benchmark commands
+
+### Step 5: Exact reads + verify-before-trust
+
+Implemented in:
+
+- `src/read_tools.h`
+- `src/read_tools.cpp`
+- `src/main.cpp`
+- `CMakeLists.txt`
+
+Added:
+
+- CLI command: `./build/codegraph find-symbol <name>`
+  - Finds exact `qualified_name` or `name` matches.
+  - Also includes simple qualified-name substring matching for local inspection.
+- CLI command: `./build/codegraph read-symbol <name>`
+  - Reads a complete symbol body by exact stored byte span when the live file hash matches the cached hash.
+  - Re-runs `scan_repository` + `index_repository` internally when the live file hash differs.
+  - Returns a fresh span with status `re_resolved` after edits that move a symbol.
+  - Reports status `gone` when the symbol disappears after re-resolution.
+- CLI command: `./build/codegraph read-file <path> --start N --end M`
+  - Returns exact 1-based inclusive line ranges from the live file.
+  - Includes the live file hash.
+- Manual smoke command: `./build/codegraph test-read`
+  - Verifies `find-symbol` finds an indexed test symbol.
+  - Verifies `read-symbol` returns the exact initial body.
+  - Verifies `read-file` returns an exact line range.
+  - Edits the backing file so the symbol moves and changes body.
+  - Verifies `read-symbol` returns status `re_resolved` and the current body/span.
+  - Deletes the symbol from the backing file.
+  - Verifies `read-symbol` returns status `gone`.
+
+Step 5 intentionally does not add:
+
+- Memory reads
+- MCP server
+- op log
+- materializer
+- CSR graph
 - benchmark commands
 
 ## Verification commands
@@ -206,6 +270,7 @@ cmake --build build
 ./build/codegraph test-storage
 ./build/codegraph test-scan
 ./build/codegraph test-index
+./build/codegraph test-read
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -214,15 +279,15 @@ cmake --build build
 
 ## Next milestone
 
-Step 5: Exact reads + verify-before-trust.
+Step 6: Op log + materializer.
 
 Scope from the spec:
 
-- Read a symbol by name.
-- Verify the backing file hash before returning source.
-- If the file hash changed, re-parse and re-resolve before returning.
-- Return fresh spans flagged `ReResolved`.
-- Report when a deleted symbol is gone.
-- Add exact file-range reads if needed by the read flow.
+- Create `.codegraph/device_id` and `.codegraph/ops/<device_id>.jsonl`.
+- Append `ADD_CORRECTION` and `ADD_DECISION` ops from CLI commands.
+- Materialize memory rows from the append-only op log.
+- Make materialization idempotent via `op_index`.
+- Resolve `affects` references to file/symbol nodes where possible, leaving unresolved edges pending.
+- Verify running materialize twice creates no duplicates.
 
-Do not implement op log, materializer, memory reads, CSR, MCP, or benchmarks.
+Do not implement memory reads, CSR, MCP, or benchmarks.

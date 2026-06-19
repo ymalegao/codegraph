@@ -5,9 +5,11 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 
 #include "file_util.h"
 #include "hash_util.h"
+#include "source_projection.h"
 #include "sqlite_util.h"
 #include "time_util.h"
 
@@ -134,13 +136,41 @@ int64_t select_file_id(Statement& select_file_id_stmt, std::string_view path) {
     return sqlite3_column_int64(select_file_id_stmt.get(), 0);
 }
 
-}  // namespace
+void prune_unseen_files(
+    Storage& storage,
+    const FrontendRegistry& registry,
+    std::string_view repo_id,
+    const std::unordered_set<std::string>& seen_paths,
+    ScanResult& result
+) {
+    Statement stmt(
+        storage.handle(),
+        "SELECT file_id, path, language FROM files ORDER BY path;"
+    );
 
-bool is_cpp_path(const std::filesystem::path& path) {
-    const std::string ext = path.extension().string();
-    return ext == ".cpp" || ext == ".cc" || ext == ".cxx" ||
-           ext == ".h" || ext == ".hpp";
+    struct StaleFile {
+        int64_t file_id = 0;
+        std::string path;
+    };
+    std::vector<StaleFile> stale_files;
+
+    while (stmt.step()) {
+        const auto* path_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        const auto* language_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
+        const std::string path = path_text == nullptr ? "" : path_text;
+        const std::string language = language_text == nullptr ? "" : language_text;
+        if (registry.for_language(language) != nullptr && seen_paths.find(path) == seen_paths.end()) {
+            stale_files.push_back(StaleFile{sqlite3_column_int64(stmt.get(), 0), path});
+        }
+    }
+
+    for (const StaleFile& file : stale_files) {
+        delete_source_file_projection(storage.handle(), repo_id, file.file_id, file.path, true);
+        ++result.files_pruned;
+    }
 }
+
+}  // namespace
 
 std::vector<uint32_t> build_line_offsets(std::string_view bytes) {
     std::vector<uint32_t> offsets{0};
@@ -177,11 +207,16 @@ std::vector<uint32_t> unpack_line_offsets(const std::vector<uint8_t>& bytes) {
     return offsets;
 }
 
-ScanResult scan_repository(Storage& storage, const ScanOptions& options) {
+ScanResult scan_repository(
+    Storage& storage,
+    const FrontendRegistry& registry,
+    const ScanOptions& options
+) {
     const std::filesystem::path repo_root = std::filesystem::weakly_canonical(options.repo_root);
     ScanResult result;
     result.branch = git_output(repo_root, "rev-parse --abbrev-ref HEAD");
     result.commit_hash = git_output(repo_root, "rev-parse HEAD");
+    std::unordered_set<std::string> seen_paths;
 
     Statement select_file(
         storage.handle(),
@@ -190,7 +225,7 @@ ScanResult scan_repository(Storage& storage, const ScanOptions& options) {
     Statement upsert_file(
         storage.handle(),
         "INSERT INTO files(path, language, content_hash, size_bytes, line_count, commit_hash, indexed_at) "
-        "VALUES (?, 'cpp', ?, ?, ?, ?, ?) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(path) DO UPDATE SET "
         "language = excluded.language, "
         "content_hash = excluded.content_hash, "
@@ -227,7 +262,12 @@ ScanResult scan_repository(Storage& storage, const ScanOptions& options) {
                 continue;
             }
 
-            if (!it->is_regular_file() || !is_cpp_path(it->path())) {
+            if (!it->is_regular_file()) {
+                continue;
+            }
+
+            const LanguageFrontend* frontend = registry.for_extension(it->path().extension().string());
+            if (frontend == nullptr) {
                 continue;
             }
 
@@ -237,6 +277,7 @@ ScanResult scan_repository(Storage& storage, const ScanOptions& options) {
             }
 
             ++result.files_seen;
+            seen_paths.insert(rel);
             const std::string bytes = read_file_bytes(it->path());
             const std::string hash = xxh64_hex(bytes);
             if (existing_hash_matches(select_file, rel, hash)) {
@@ -250,11 +291,12 @@ ScanResult scan_repository(Storage& storage, const ScanOptions& options) {
 
             upsert_file.reset();
             bind_text(upsert_file.get(), 1, rel);
-            bind_text(upsert_file.get(), 2, hash);
-            bind_int64(upsert_file.get(), 3, static_cast<int64_t>(bytes.size()));
-            bind_int64(upsert_file.get(), 4, static_cast<int64_t>(offsets.size()));
-            bind_text(upsert_file.get(), 5, result.commit_hash);
-            bind_text(upsert_file.get(), 6, indexed_at);
+            bind_text(upsert_file.get(), 2, frontend->language());
+            bind_text(upsert_file.get(), 3, hash);
+            bind_int64(upsert_file.get(), 4, static_cast<int64_t>(bytes.size()));
+            bind_int64(upsert_file.get(), 5, static_cast<int64_t>(offsets.size()));
+            bind_text(upsert_file.get(), 6, result.commit_hash);
+            bind_text(upsert_file.get(), 7, indexed_at);
             upsert_file.expect_done("upsert file");
 
             const int64_t file_id = select_file_id(select_file_id_stmt, rel);
@@ -267,6 +309,7 @@ ScanResult scan_repository(Storage& storage, const ScanOptions& options) {
             result.bytes_indexed += static_cast<uint64_t>(bytes.size());
         }
 
+        prune_unseen_files(storage, registry, options.repo_id, seen_paths, result);
         storage.execute("COMMIT;");
     } catch (...) {
         storage.execute("ROLLBACK;");
