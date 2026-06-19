@@ -397,6 +397,7 @@ scan():
      else:
         build line-offset table (byte offset of each line start); store packed uint32[]
         upsert files row
+     upsert File node
   prune any registered-language files rows not seen in this scan:
      delete line_tables row
      delete symbols and Symbol nodes for that file

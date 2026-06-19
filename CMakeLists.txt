@@ -148,6 +148,25 @@ target_compile_options(codegraph_source_projection PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_resolver
+  src/resolver.cpp
+)
+
+target_include_directories(codegraph_resolver PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_resolver PUBLIC
+  codegraph_sanitizers
+  codegraph_storage
+)
+
+target_compile_options(codegraph_resolver PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_library(codegraph_scanner
   src/scanner.cpp
 )
@@ -160,6 +179,7 @@ target_link_libraries(codegraph_scanner PUBLIC
   codegraph_sanitizers
   codegraph_frontend
   codegraph_hash
+  codegraph_resolver
   codegraph_source_projection
   codegraph_storage
 )
@@ -238,6 +258,28 @@ target_compile_options(codegraph_read_tools PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_materializer
+  src/materializer.cpp
+)
+
+target_include_directories(codegraph_materializer PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_materializer PUBLIC
+  codegraph_sanitizers
+  codegraph_hash
+  codegraph_resolver
+  codegraph_storage
+  nlohmann_json::nlohmann_json
+)
+
+target_compile_options(codegraph_materializer PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_executable(codegraph
   src/main.cpp
 )
@@ -248,7 +290,9 @@ target_link_libraries(codegraph PRIVATE
   codegraph_frontend
   codegraph_hash
   codegraph_indexer
+  codegraph_materializer
   codegraph_read_tools
+  codegraph_resolver
   codegraph_source_projection
   codegraph_storage
   codegraph_scanner

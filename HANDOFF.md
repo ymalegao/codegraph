@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Specification: `design_spec.md`
-- Current milestone completed in this handoff: Step 5, Exact reads + verify-before-trust
+- Current milestone completed in this handoff: Step 6, Op log + materializer
 - Build system: CMake + Ninja
 - Executable target: `codegraph`
 
@@ -255,9 +255,59 @@ Step 5 intentionally does not add:
 
 - Memory reads
 - MCP server
-- op log
-- materializer
 - CSR graph
+- benchmark commands
+
+### Step 6: Op log + materializer
+
+Implemented in:
+
+- `src/materializer.h`
+- `src/materializer.cpp`
+- `src/resolver.h`
+- `src/resolver.cpp`
+- `src/scanner.cpp`
+- `src/main.cpp`
+- `CMakeLists.txt`
+
+Added:
+
+- `.codegraph/device_id` creation with a stable local device id.
+- `.codegraph/ops/<device_id>.jsonl` append-only op log.
+- `ADD_CORRECTION` op appending.
+- `ADD_DECISION` op appending.
+- Deterministic materialization sorted by `(lamport, device_id)`.
+- Idempotency through `op_index`.
+- Memory node stable ids as `memory:<device_id>:<lamport>`.
+- Memory row projection into `memories`.
+- Correction path rule projection into `path_rules`.
+- `affects` edge projection into `edges`.
+- Resolver pass for:
+  - file references: `path`
+  - symbol references: `path::qualified_name`
+  - unique qualified-name references as a convenience
+- Pending unresolved `affects` edges.
+- Scanner now upserts File nodes and runs `resolver_pass()` after each scan, so memory edges that reference newly scanned files can resolve.
+- CLI command: `./build/codegraph remember --title T --body B --affects P [--affects P2 ...]`
+  - Appends an `ADD_DECISION` op.
+  - Runs `materialize`.
+- CLI command: `./build/codegraph correct --reason R --affects P [--prefer G] [--avoid G] [--title T]`
+  - Appends an `ADD_CORRECTION` op.
+  - Runs `materialize`.
+- CLI command: `./build/codegraph materialize`
+  - Replays unapplied ops and runs resolver pass.
+- Manual smoke command: `./build/codegraph test-materialize`
+  - Verifies correction and decision ops append.
+  - Verifies materialized `memories`, `path_rules`, and `affects` edges.
+  - Verifies running materialize twice does not duplicate memory rows or edges.
+  - Verifies an `affects` edge for a not-yet-indexed path lands pending.
+  - Verifies a later `scan` resolves that pending edge once the file exists.
+
+Step 6 intentionally does not add:
+
+- Memory read commands
+- CSR graph
+- MCP server
 - benchmark commands
 
 ## Verification commands
@@ -271,6 +321,7 @@ cmake --build build
 ./build/codegraph test-scan
 ./build/codegraph test-index
 ./build/codegraph test-read
+./build/codegraph test-materialize
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -279,15 +330,15 @@ cmake --build build
 
 ## Next milestone
 
-Step 6: Op log + materializer.
+Step 7: Memory reads.
 
 Scope from the spec:
 
-- Create `.codegraph/device_id` and `.codegraph/ops/<device_id>.jsonl`.
-- Append `ADD_CORRECTION` and `ADD_DECISION` ops from CLI commands.
-- Materialize memory rows from the append-only op log.
-- Make materialization idempotent via `op_index`.
-- Resolve `affects` references to file/symbol nodes where possible, leaving unresolved edges pending.
-- Verify running materialize twice creates no duplicates.
+- Implement `get_memory_for_file` behavior via reverse `Affects` edges.
+- Implement `get_memory_for_symbol` behavior via reverse `Affects` edges.
+- Add CLI inspection command(s), likely `memory-for <path-or-symbol>`.
+- Include correction titles, prefer/avoid rules, and reasons.
+- Include architecture decision titles and bodies.
+- Verify a correction on `resdb/**`-style paths is returned with reason for affected files.
 
-Do not implement memory reads, CSR, MCP, or benchmarks.
+Do not implement CSR, MCP, or benchmarks.

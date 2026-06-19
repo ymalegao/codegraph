@@ -12,6 +12,7 @@
 #include "core.h"
 #include "cpp_frontend.h"
 #include "indexer.h"
+#include "materializer.h"
 #include "read_tools.h"
 #include "scanner.h"
 #include "storage.h"
@@ -98,10 +99,48 @@ struct RemoveOnExit {
     }
 };
 
+struct RemoveTreeOnExit {
+    std::filesystem::path path;
+
+    ~RemoveTreeOnExit() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path, ignored);
+    }
+};
+
 codegraph::FrontendRegistry make_frontend_registry() {
     codegraph::FrontendRegistry registry;
     registry.add(std::make_unique<codegraph::CppFrontend>());
     return registry;
+}
+
+std::vector<std::string> collect_repeated_values(
+    const std::vector<std::string>& args,
+    std::string_view option
+) {
+    std::vector<std::string> values;
+    for (size_t i = 0; i + 1U < args.size(); ++i) {
+        if (args[i] == option) {
+            values.push_back(args[i + 1U]);
+        }
+    }
+    return values;
+}
+
+std::string single_option_value(
+    const std::vector<std::string>& args,
+    std::string_view option,
+    bool required
+) {
+    for (size_t i = 0; i + 1U < args.size(); ++i) {
+        if (args[i] == option) {
+            return args[i + 1U];
+        }
+    }
+    if (required) {
+        throw std::runtime_error("missing required option: " + std::string(option));
+    }
+    return {};
 }
 
 void sqlite_exec(sqlite3* db, const char* sql) {
@@ -600,6 +639,86 @@ int command_read_file(const std::vector<std::string>& args) {
     return 0;
 }
 
+int command_materialize() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+
+    std::filesystem::create_directories(codegraph_dir);
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    const codegraph::MaterializeResult result =
+        codegraph::materialize(storage, codegraph_dir);
+    std::cout << "materialize: ok\n";
+    std::cout << "ops_applied: " << result.ops_applied << "\n";
+    std::cout << "edges_resolved: " << result.edges_resolved << "\n";
+    return 0;
+}
+
+int command_remember(const std::vector<std::string>& args) {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+
+    codegraph::DecisionInput input{
+        single_option_value(args, "--title", true),
+        single_option_value(args, "--body", true),
+        collect_repeated_values(args, "--affects"),
+    };
+    if (input.affects.empty()) {
+        throw std::runtime_error("remember requires at least one --affects value");
+    }
+
+    std::filesystem::create_directories(codegraph_dir);
+    const std::string op_id = codegraph::append_decision_op(codegraph_dir, input);
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+    const codegraph::MaterializeResult result = codegraph::materialize(storage, codegraph_dir);
+
+    std::cout << "remember: ok\n";
+    std::cout << "op_id: " << op_id << "\n";
+    std::cout << "ops_applied: " << result.ops_applied << "\n";
+    std::cout << "edges_resolved: " << result.edges_resolved << "\n";
+    return 0;
+}
+
+int command_correct(const std::vector<std::string>& args) {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+
+    codegraph::CorrectionInput input;
+    input.title = single_option_value(args, "--title", false);
+    input.reason = single_option_value(args, "--reason", true);
+    input.prefer_paths = collect_repeated_values(args, "--prefer");
+    input.avoid_paths = collect_repeated_values(args, "--avoid");
+    input.affects = collect_repeated_values(args, "--affects");
+    if (input.title.empty()) {
+        input.title = input.reason;
+    }
+    if (input.affects.empty()) {
+        throw std::runtime_error("correct requires at least one --affects value");
+    }
+    if (input.prefer_paths.empty() && input.avoid_paths.empty()) {
+        throw std::runtime_error("correct requires at least one --prefer or --avoid value");
+    }
+
+    std::filesystem::create_directories(codegraph_dir);
+    const std::string op_id = codegraph::append_correction_op(codegraph_dir, input);
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+    const codegraph::MaterializeResult result = codegraph::materialize(storage, codegraph_dir);
+
+    std::cout << "correct: ok\n";
+    std::cout << "op_id: " << op_id << "\n";
+    std::cout << "ops_applied: " << result.ops_applied << "\n";
+    std::cout << "edges_resolved: " << result.edges_resolved << "\n";
+    return 0;
+}
+
 int command_test_scan() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path =
@@ -918,6 +1037,123 @@ int command_test_read() {
     return 0;
 }
 
+int command_test_materialize() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-materialize.sqlite";
+    const std::filesystem::path codegraph_dir =
+        repo_root / "build" / "codegraph-test-materialize-cg";
+    const std::filesystem::path pending_file =
+        repo_root / "testing" / "codegraph_materialize_pending.cpp";
+    const std::string pending_ref = "testing/codegraph_materialize_pending.cpp";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+    std::filesystem::remove_all(codegraph_dir, ignored);
+    std::filesystem::remove(pending_file, ignored);
+    RemoveTreeOnExit remove_codegraph_dir{codegraph_dir};
+    RemoveOnExit remove_pending_file{pending_file};
+
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+
+        const std::string device_id = codegraph::ensure_device_id(codegraph_dir);
+        require(!device_id.empty(), "materializer did not create device_id");
+
+        const std::string correction_op = codegraph::append_correction_op(
+            codegraph_dir,
+            codegraph::CorrectionInput{
+                "Prefer generated fixture",
+                "Use the pending fixture once it exists.",
+                {"testing/**"},
+                {"missing/**"},
+                {pending_ref},
+            }
+        );
+        require(!correction_op.empty(), "append correction did not return op_id");
+
+        codegraph::MaterializeResult first = codegraph::materialize(storage, codegraph_dir);
+        require(first.ops_applied == 1U, "first materialize did not apply one correction op");
+        require(
+            storage.query_int("SELECT COUNT(*) FROM memories WHERE memory_type = 'correction';") == 1,
+            "correction memory was not materialized"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM path_rules WHERE rule_kind = 'prefer';") == 1,
+            "prefer path rule was not materialized"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM path_rules WHERE rule_kind = 'avoid';") == 1,
+            "avoid path rule was not materialized"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'affects' "
+                              "AND to_ref = 'testing/codegraph_materialize_pending.cpp' "
+                              "AND resolved = 0;") == 1,
+            "pending correction edge was not left unresolved"
+        );
+
+        const std::string decision_op = codegraph::append_decision_op(
+            codegraph_dir,
+            codegraph::DecisionInput{
+                "Keep sample indexed",
+                "The sample file anchors materializer tests.",
+                {"testing/sample.cpp"},
+            }
+        );
+        require(!decision_op.empty(), "append decision did not return op_id");
+
+        codegraph::MaterializeResult second = codegraph::materialize(storage, codegraph_dir);
+        require(second.ops_applied == 1U, "second materialize did not apply one decision op");
+        require(
+            storage.query_int("SELECT COUNT(*) FROM memories WHERE memory_type = 'arch_decision';") == 1,
+            "decision memory was not materialized"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'affects' "
+                              "AND to_ref = 'testing/sample.cpp' AND resolved = 1;") == 1,
+            "decision affects edge did not resolve to existing file"
+        );
+
+        const int64_t memories_before = storage.query_int("SELECT COUNT(*) FROM memories;");
+        const int64_t edges_before = storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'affects';");
+        codegraph::MaterializeResult third = codegraph::materialize(storage, codegraph_dir);
+        require(third.ops_applied == 0U, "idempotent materialize re-applied ops");
+        require(storage.query_int("SELECT COUNT(*) FROM memories;") == memories_before,
+                "idempotent materialize duplicated memories");
+        require(storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'affects';") == edges_before,
+                "idempotent materialize duplicated affects edges");
+
+        write_file(
+            pending_file,
+            "namespace materialize_pending {\n"
+            "int ready() {\n"
+            "    return 1;\n"
+            "}\n"
+            "}\n"
+        );
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        require(
+            storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'affects' "
+                              "AND to_ref = 'testing/codegraph_materialize_pending.cpp' "
+                              "AND resolved = 1;") == 1,
+            "scan did not resolve pending correction edge after file appeared"
+        );
+    }
+
+    std::filesystem::remove(db_path, ignored);
+
+    std::cout << "append ops: ok\n";
+    std::cout << "materialize memories: ok\n";
+    std::cout << "materialize idempotent: ok\n";
+    std::cout << "pending edge resolves after scan: ok\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
@@ -928,12 +1164,16 @@ void print_usage() {
         << "  codegraph find-symbol <name>\n"
         << "  codegraph read-symbol <name>\n"
         << "  codegraph read-file <path> --start N --end M\n"
+        << "  codegraph remember --title T --body B --affects P [--affects P2 ...]\n"
+        << "  codegraph correct --reason R --affects P [--prefer G] [--avoid G]\n"
+        << "  codegraph materialize\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
         << "  codegraph test-storage\n"
         << "  codegraph test-scan\n"
         << "  codegraph test-index\n"
-        << "  codegraph test-read\n";
+        << "  codegraph test-read\n"
+        << "  codegraph test-materialize\n";
 }
 
 
@@ -969,6 +1209,26 @@ int main(int argc, char** argv) {
             return command_read_file({argv[2], argv[3], argv[4], argv[5], argv[6]});
         }
 
+        if (argc >= 2 && std::strcmp(argv[1], "materialize") == 0) {
+            return command_materialize();
+        }
+
+        if (argc >= 2 && std::strcmp(argv[1], "remember") == 0) {
+            std::vector<std::string> args;
+            for (int i = 2; i < argc; ++i) {
+                args.emplace_back(argv[i]);
+            }
+            return command_remember(args);
+        }
+
+        if (argc >= 2 && std::strcmp(argv[1], "correct") == 0) {
+            std::vector<std::string> args;
+            for (int i = 2; i < argc; ++i) {
+                args.emplace_back(argv[i]);
+            }
+            return command_correct(args);
+        }
+
         if (argc == 3 && std::strcmp(argv[1], "parse-smoke") == 0) {
             return command_parse_smoke(argv[2]);
         }
@@ -991,6 +1251,10 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-read") == 0) {
             return command_test_read();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-materialize") == 0) {
+            return command_test_materialize();
         }
 
         print_usage();

@@ -9,6 +9,7 @@
 
 #include "file_util.h"
 #include "hash_util.h"
+#include "resolver.h"
 #include "source_projection.h"
 #include "sqlite_util.h"
 #include "time_util.h"
@@ -238,6 +239,13 @@ ScanResult scan_repository(
         storage.handle(),
         "SELECT file_id FROM files WHERE path = ?;"
     );
+    Statement upsert_file_node(
+        storage.handle(),
+        "INSERT INTO nodes(stable_id, kind, title, created_at, status) "
+        "VALUES (?, 'file', ?, ?, 'active') "
+        "ON CONFLICT(stable_id) DO UPDATE SET "
+        "kind = 'file', title = excluded.title, status = 'active';"
+    );
     Statement upsert_line_table(
         storage.handle(),
         "INSERT INTO line_tables(file_id, offsets_blob) "
@@ -278,6 +286,13 @@ ScanResult scan_repository(
 
             ++result.files_seen;
             seen_paths.insert(rel);
+
+            upsert_file_node.reset();
+            bind_text(upsert_file_node.get(), 1, file_stable_id(options.repo_id, rel));
+            bind_text(upsert_file_node.get(), 2, rel);
+            bind_text(upsert_file_node.get(), 3, current_utc_timestamp());
+            upsert_file_node.expect_done("upsert file node");
+
             const std::string bytes = read_file_bytes(it->path());
             const std::string hash = xxh64_hex(bytes);
             if (existing_hash_matches(select_file, rel, hash)) {
@@ -310,6 +325,7 @@ ScanResult scan_repository(
         }
 
         prune_unseen_files(storage, registry, options.repo_id, seen_paths, result);
+        (void)resolver_pass(storage);
         storage.execute("COMMIT;");
     } catch (...) {
         storage.execute("ROLLBACK;");
