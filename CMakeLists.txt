@@ -111,6 +111,27 @@ target_compile_options(codegraph_hash PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_graph_store
+  src/graph_store.cpp
+)
+
+target_include_directories(codegraph_graph_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_graph_store PUBLIC
+  codegraph_sanitizers
+  codegraph_core
+  codegraph_hash
+  codegraph_storage
+)
+
+target_compile_options(codegraph_graph_store PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_library(codegraph_frontend
   src/frontend.cpp
 )
@@ -158,6 +179,7 @@ target_include_directories(codegraph_resolver PUBLIC
 
 target_link_libraries(codegraph_resolver PUBLIC
   codegraph_sanitizers
+  codegraph_source_projection
   codegraph_storage
 )
 
@@ -308,6 +330,7 @@ target_link_libraries(codegraph PRIVATE
   codegraph_core
   codegraph_cpp_frontend
   codegraph_frontend
+  codegraph_graph_store
   codegraph_hash
   codegraph_indexer
   codegraph_materializer

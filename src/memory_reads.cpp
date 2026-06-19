@@ -1,8 +1,7 @@
 #include "memory_reads.h"
 
-#include <regex>
 #include <string>
-#include <unordered_map>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -12,55 +11,44 @@
 namespace codegraph {
 namespace {
 
-std::string regex_escape(char ch) {
-    static constexpr std::string_view kSpecial = R"(\.^$|()[]{}+?)";
-    if (kSpecial.find(ch) != std::string_view::npos) {
-        return std::string("\\") + ch;
-    }
-    return std::string(1, ch);
-}
-
-std::regex glob_to_regex(std::string_view pattern) {
-    std::string regex = "^";
-    for (size_t i = 0; i < pattern.size(); ++i) {
-        const char ch = pattern[i];
-        if (ch == '*') {
-            if (i + 1U < pattern.size() && pattern[i + 1U] == '*') {
-                regex += ".*";
-                ++i;
-            } else {
-                regex += "[^/]*";
+bool glob_match_from(std::string_view pattern, size_t pi, std::string_view path, size_t si) {
+    while (pi < pattern.size()) {
+        if (pattern[pi] == '*') {
+            const bool globstar = pi + 1U < pattern.size() && pattern[pi + 1U] == '*';
+            const size_t next_pi = pi + (globstar ? 2U : 1U);
+            for (size_t next_si = si; next_si <= path.size(); ++next_si) {
+                if (!globstar && path.substr(si, next_si - si).find('/') != std::string_view::npos) {
+                    break;
+                }
+                if (glob_match_from(pattern, next_pi, path, next_si)) {
+                    return true;
+                }
             }
-        } else {
-            regex += regex_escape(ch);
+            return false;
         }
+
+        if (si >= path.size() || pattern[pi] != path[si]) {
+            return false;
+        }
+        ++pi;
+        ++si;
     }
-    regex += "$";
-    return std::regex(regex);
+    return si == path.size();
 }
 
 bool glob_matches(std::string_view pattern, std::string_view path) {
-    return std::regex_match(
-        std::string(path),
-        glob_to_regex(pattern)
-    );
+    return glob_match_from(pattern, 0, path, 0);
 }
 
 MemoryView memory_from_statement(sqlite3_stmt* stmt, int provenance_column) {
-    const auto* type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-    const auto* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-    const auto* body = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-    const auto* created_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-    const auto* provenance = reinterpret_cast<const char*>(sqlite3_column_text(stmt, provenance_column));
-
     MemoryView memory;
     memory.memory_id = sqlite3_column_int64(stmt, 0);
     memory.node_id = sqlite3_column_int64(stmt, 1);
-    memory.memory_type = type == nullptr ? "" : type;
-    memory.title = title == nullptr ? "" : title;
-    memory.body = body == nullptr ? "" : body;
-    memory.created_at = created_at == nullptr ? "" : created_at;
-    memory.provenance = provenance == nullptr ? "" : provenance;
+    memory.memory_type = column_text(stmt, 2);
+    memory.title = column_text(stmt, 3);
+    memory.body = column_text(stmt, 4);
+    memory.created_at = column_text(stmt, 5);
+    memory.provenance = column_text(stmt, provenance_column);
     return memory;
 }
 
@@ -127,22 +115,19 @@ void add_matching_path_rules(Storage& storage, std::string_view path, MemoryRead
     );
 
     while (stmt.step()) {
-        const auto* rule_kind = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6));
-        const auto* pattern = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 7));
-        const auto* reason = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 8));
-        const std::string pattern_text = pattern == nullptr ? "" : pattern;
+        const std::string rule_kind = column_text(stmt.get(), 6);
+        const std::string pattern_text = column_text(stmt.get(), 7);
+        const std::string reason = column_text(stmt.get(), 8);
         if (!glob_matches(pattern_text, path)) {
             continue;
         }
 
         MemoryView memory = memory_from_statement(stmt.get(), 8);
-        memory.provenance = "path rule " +
-                            std::string(rule_kind == nullptr ? "" : rule_kind) +
-                            " " + pattern_text;
+        memory.provenance = "path rule " + rule_kind + " " + pattern_text;
         memory.path_rules.push_back(PathRuleView{
-            rule_kind == nullptr ? "" : rule_kind,
+            rule_kind,
             pattern_text,
-            reason == nullptr ? "" : reason,
+            reason,
         });
         add_memory(result, std::move(memory));
     }

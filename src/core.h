@@ -83,6 +83,20 @@ struct MemoryData {
     int64_t body_rowid;
 };
 
+struct Csr {
+    std::vector<uint32_t> offsets;
+    std::vector<NodeId> neighbors;
+    std::vector<EdgeKind> kinds;
+};
+
+struct Graph {
+    std::vector<Node> nodes;
+    std::vector<SymbolData> symbols;
+    std::vector<MemoryData> memos;
+    Csr forward;
+    Csr reverse;
+};
+
 class StringInterner {
 public:
     StringInterner();

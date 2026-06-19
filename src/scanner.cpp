@@ -125,9 +125,7 @@ bool existing_hash_matches(Statement& select_file, std::string_view path, std::s
         return false;
     }
 
-    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(select_file.get(), 0));
-    const int size = sqlite3_column_bytes(select_file.get(), 0);
-    return text != nullptr && std::string_view(text, static_cast<size_t>(size)) == hash;
+    return column_text(select_file.get(), 0) == hash;
 }
 
 int64_t select_file_id(Statement& select_file_id_stmt, std::string_view path) {
@@ -156,10 +154,8 @@ void prune_unseen_files(
     std::vector<StaleFile> stale_files;
 
     while (stmt.step()) {
-        const auto* path_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-        const auto* language_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
-        const std::string path = path_text == nullptr ? "" : path_text;
-        const std::string language = language_text == nullptr ? "" : language_text;
+        const std::string path = column_text(stmt.get(), 1);
+        const std::string language = column_text(stmt.get(), 2);
         if (registry.for_language(language) != nullptr && seen_paths.find(path) == seen_paths.end()) {
             stale_files.push_back(StaleFile{sqlite3_column_int64(stmt.get(), 0), path});
         }

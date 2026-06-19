@@ -33,12 +33,10 @@ std::vector<FileRow> load_files_for_language(sqlite3* db, std::string_view langu
 
     std::vector<FileRow> files;
     while (stmt.step()) {
-        const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-        const auto* commit = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
         files.push_back(FileRow{
             sqlite3_column_int64(stmt.get(), 0),
-            path == nullptr ? "" : path,
-            commit == nullptr ? "" : commit,
+            column_text(stmt.get(), 1),
+            column_text(stmt.get(), 2),
         });
     }
     return files;

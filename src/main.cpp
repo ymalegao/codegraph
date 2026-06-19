@@ -1,4 +1,7 @@
 #include <cstdlib>
+#include <chrono>
+#include <array>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -11,11 +14,14 @@
 
 #include "core.h"
 #include "cpp_frontend.h"
+#include "graph_store.h"
 #include "indexer.h"
 #include "materializer.h"
 #include "memory_reads.h"
 #include "read_tools.h"
+#include "resolver.h"
 #include "scanner.h"
+#include "sqlite_util.h"
 #include "storage.h"
 
 #include <nlohmann/json.hpp>
@@ -81,6 +87,46 @@ std::string read_file(const std::string& path) {
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
+}
+
+std::string shell_quote(const std::string& value) {
+    std::string quoted = "'";
+    for (const char ch : value) {
+        if (ch == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += ch;
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
+int run_command_count_lines(const std::string& command) {
+    std::array<char, 256> buffer{};
+    int lines = 0;
+
+    FILE* pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr) {
+        throw std::runtime_error("failed to run command: " + command);
+    }
+
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        ++lines;
+    }
+
+    const int rc = pclose(pipe);
+    if (rc != 0 && rc != 256) {
+        throw std::runtime_error("command failed: " + command);
+    }
+    return lines;
+}
+
+uint32_t rg_text_count(const std::filesystem::path& repo_root, const std::string& text) {
+    const std::string command =
+        "rg --fixed-strings --line-number --color never " +
+        shell_quote(text) + " " + shell_quote(repo_root.string());
+    return static_cast<uint32_t>(run_command_count_lines(command));
 }
 
 void write_file(const std::filesystem::path& path, std::string_view contents) {
@@ -754,6 +800,152 @@ int command_memory_for(const std::string& target) {
     return 0;
 }
 
+uint32_t sql_direct_memory_count(codegraph::Storage& storage, int64_t target_node) {
+    codegraph::Statement stmt(
+        storage.handle(),
+        "SELECT COUNT(DISTINCT m.memory_id) "
+        "FROM edges e JOIN memories m ON m.node_id = e.from_node "
+        "WHERE e.kind = 'affects' AND e.resolved = 1 AND e.to_node = ?;"
+    );
+    codegraph::bind_int64(stmt.get(), 1, target_node);
+    stmt.expect_row("count direct memory edges");
+    return static_cast<uint32_t>(sqlite3_column_int64(stmt.get(), 0));
+}
+
+uint32_t sql_symbol_lookup_count(codegraph::Storage& storage, std::string_view symbol) {
+    codegraph::Statement stmt(
+        storage.handle(),
+        "SELECT COUNT(*) FROM symbols WHERE name = ? OR qualified_name = ?;"
+    );
+    codegraph::bind_text(stmt.get(), 1, symbol);
+    codegraph::bind_text(stmt.get(), 2, symbol);
+    stmt.expect_row("count symbol lookup");
+    return static_cast<uint32_t>(sqlite3_column_int64(stmt.get(), 0));
+}
+
+uint64_t elapsed_ns(const std::chrono::steady_clock::time_point& start,
+                    const std::chrono::steady_clock::time_point& end) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()
+    );
+}
+
+int command_bench(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        throw std::runtime_error("usage: codegraph bench memory-for <target> [repetitions]");
+    }
+
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    if (args[0] == "lookup") {
+        if (args.size() < 2U) {
+            throw std::runtime_error("usage: codegraph bench lookup <symbol> [repetitions]");
+        }
+        const uint32_t repetitions = args.size() >= 3U ? static_cast<uint32_t>(std::stoul(args[2])) : 10U;
+        const codegraph::GraphIndex graph = codegraph::build_graph_index(storage);
+
+        size_t graph_count = 0;
+        const auto graph_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            graph_count += codegraph::graph_symbols_by_name_hash(graph, args[1]).size();
+        }
+        const auto graph_end = std::chrono::steady_clock::now();
+
+        uint32_t sql_count = 0;
+        const auto sql_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            sql_count += sql_symbol_lookup_count(storage, args[1]);
+        }
+        const auto sql_end = std::chrono::steady_clock::now();
+
+        uint32_t rg_count = 0;
+        const auto rg_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            rg_count += rg_text_count(repo_root, args[1]);
+        }
+        const auto rg_end = std::chrono::steady_clock::now();
+
+        std::cout << "bench: lookup\n";
+        std::cout << "repetitions: " << repetitions << "\n";
+        std::cout << "graph_symbol_count: " << graph_count << "\n";
+        std::cout << "sql_symbol_count: " << sql_count << "\n";
+        std::cout << "rg_text_count: " << rg_count << "\n";
+        std::cout << "graph_ns_total: " << elapsed_ns(graph_start, graph_end) << "\n";
+        std::cout << "sql_ns_total: " << elapsed_ns(sql_start, sql_end) << "\n";
+        std::cout << "rg_ns_total: " << elapsed_ns(rg_start, rg_end) << "\n";
+        std::cout << "rg_note: text search is inexact and may include comments, calls, and strings\n";
+        return 0;
+    }
+
+    if (args[0] == "memory-for") {
+        if (args.size() < 2U) {
+            throw std::runtime_error("usage: codegraph bench memory-for <target> [repetitions]");
+        }
+        const uint32_t repetitions = args.size() >= 3U ? static_cast<uint32_t>(std::stoul(args[2])) : 10U;
+        const int64_t target_node = codegraph::resolve_reference(storage, args[1]);
+        if (target_node < 0) {
+            throw std::runtime_error("bench target does not resolve to a source node");
+        }
+
+        const codegraph::GraphIndex graph = codegraph::build_graph_index(storage);
+        const auto node = static_cast<codegraph::NodeId>(static_cast<uint32_t>(target_node));
+
+        uint32_t sql_count = 0;
+        const auto sql_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            sql_count += sql_direct_memory_count(storage, target_node);
+        }
+        const auto sql_end = std::chrono::steady_clock::now();
+
+        uint32_t csr_count = 0;
+        const auto csr_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            csr_count += codegraph::graph_memory_count_for_node(graph, node);
+        }
+        const auto csr_end = std::chrono::steady_clock::now();
+
+        std::cout << "bench: memory-for\n";
+        std::cout << "target: " << args[1] << "\n";
+        std::cout << "repetitions: " << repetitions << "\n";
+        std::cout << "sql_count: " << sql_count << "\n";
+        std::cout << "csr_count: " << csr_count << "\n";
+        std::cout << "sql_ns_total: " << elapsed_ns(sql_start, sql_end) << "\n";
+        std::cout << "csr_ns_total: " << elapsed_ns(csr_start, csr_end) << "\n";
+        return 0;
+    }
+
+    if (args[0] == "read") {
+        if (args.size() < 2U) {
+            throw std::runtime_error("usage: codegraph bench read <symbol> [repetitions]");
+        }
+        const uint32_t repetitions = args.size() >= 3U ? static_cast<uint32_t>(std::stoul(args[2])) : 10U;
+        codegraph::FrontendRegistry registry = make_frontend_registry();
+        size_t bytes = 0;
+        const auto start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            const codegraph::ReadSymbolResult result = codegraph::read_symbol_verified(
+                storage,
+                registry,
+                codegraph::IndexOptions{repo_root},
+                args[1]
+            );
+            bytes += result.body.size();
+        }
+        const auto end = std::chrono::steady_clock::now();
+
+        std::cout << "bench: read\n";
+        std::cout << "repetitions: " << repetitions << "\n";
+        std::cout << "bytes_read: " << bytes << "\n";
+        std::cout << "ns_total: " << elapsed_ns(start, end) << "\n";
+        return 0;
+    }
+
+    throw std::runtime_error("unknown bench kind: " + args[0]);
+}
+
 int command_test_scan() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path =
@@ -1288,6 +1480,157 @@ int command_test_memory_reads() {
     return 0;
 }
 
+int command_test_graph() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-graph.sqlite";
+    const std::filesystem::path codegraph_dir =
+        repo_root / "build" / "codegraph-test-graph-cg";
+    const std::filesystem::path fixture_file =
+        repo_root / "testing" / "codegraph_graph_target.cpp";
+    const std::string target_ref = "testing/codegraph_graph_target.cpp";
+    const std::string symbol_name = "graph_target::anchor";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+    std::filesystem::remove_all(codegraph_dir, ignored);
+    std::filesystem::remove(fixture_file, ignored);
+    RemoveTreeOnExit remove_codegraph_dir{codegraph_dir};
+    RemoveOnExit remove_fixture_file{fixture_file};
+
+    write_file(
+        fixture_file,
+        "namespace graph_target {\n"
+        "int anchor() {\n"
+        "    return 8;\n"
+        "}\n"
+        "}\n"
+    );
+
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+
+        constexpr uint32_t kMemoryCount = 96;
+        for (uint32_t i = 0; i < kMemoryCount; ++i) {
+            (void)codegraph::append_decision_op(
+                codegraph_dir,
+                codegraph::DecisionInput{
+                    "Graph bench decision " + std::to_string(i),
+                    "Decision body " + std::to_string(i),
+                    {target_ref},
+                }
+            );
+        }
+        const codegraph::MaterializeResult materialized =
+            codegraph::materialize(storage, codegraph_dir);
+        require(materialized.ops_applied == kMemoryCount,
+                "graph test did not materialize expected memories");
+
+        const int64_t target_node = codegraph::resolve_reference(storage, target_ref);
+        require(target_node >= 0, "graph test target did not resolve");
+
+        const codegraph::GraphIndex graph = codegraph::build_graph_index(storage);
+        const auto node = static_cast<codegraph::NodeId>(static_cast<uint32_t>(target_node));
+
+        constexpr uint32_t kRepetitions = 10;
+        uint32_t sql_total = 0;
+        const auto sql_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < kRepetitions; ++i) {
+            sql_total += sql_direct_memory_count(storage, target_node);
+        }
+        const auto sql_end = std::chrono::steady_clock::now();
+
+        uint32_t csr_total = 0;
+        const auto csr_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < kRepetitions; ++i) {
+            csr_total += codegraph::graph_memory_count_for_node(graph, node);
+        }
+        const auto csr_end = std::chrono::steady_clock::now();
+
+        require(sql_total == kMemoryCount * kRepetitions,
+                "SQL memory count did not match expected count");
+        require(csr_total == sql_total,
+                "CSR memory count did not match SQL memory count");
+
+        const uint64_t sql_ns = elapsed_ns(sql_start, sql_end);
+        const uint64_t csr_ns = elapsed_ns(csr_start, csr_end);
+        require(csr_ns < sql_ns, "CSR memory lookup was not faster than SQL in graph test fixture");
+
+        const std::vector<codegraph::NodeId> graph_symbols =
+            codegraph::graph_symbols_by_name_hash(graph, symbol_name);
+        const int64_t sql_symbols = storage.query_int(
+            "SELECT COUNT(*) FROM symbols WHERE qualified_name = 'graph_target::anchor';"
+        );
+        require(static_cast<int64_t>(graph_symbols.size()) == sql_symbols,
+                "symbol_by_namehash did not match SQL symbol count");
+
+        size_t graph_lookup_total = 0;
+        const auto graph_lookup_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < kRepetitions; ++i) {
+            graph_lookup_total += codegraph::graph_symbols_by_name_hash(graph, symbol_name).size();
+        }
+        const auto graph_lookup_end = std::chrono::steady_clock::now();
+
+        uint32_t sql_lookup_total = 0;
+        const auto sql_lookup_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < kRepetitions; ++i) {
+            sql_lookup_total += sql_symbol_lookup_count(storage, symbol_name);
+        }
+        const auto sql_lookup_end = std::chrono::steady_clock::now();
+
+        uint32_t rg_lookup_total = 0;
+        const auto rg_lookup_start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < kRepetitions; ++i) {
+            rg_lookup_total += rg_text_count(repo_root, symbol_name);
+        }
+        const auto rg_lookup_end = std::chrono::steady_clock::now();
+
+        require(static_cast<int64_t>(graph_lookup_total) == sql_symbols * kRepetitions,
+                "graph symbol lookup repeated count did not match SQL");
+        require(static_cast<int64_t>(sql_lookup_total) == sql_symbols * kRepetitions,
+                "SQL symbol lookup repeated count did not match expected count");
+        require(rg_lookup_total >= graph_lookup_total,
+                "rg text lookup returned fewer matches than exact graph lookup in fixture");
+
+        const uint64_t graph_lookup_ns = elapsed_ns(graph_lookup_start, graph_lookup_end);
+        const uint64_t sql_lookup_ns = elapsed_ns(sql_lookup_start, sql_lookup_end);
+        const uint64_t rg_lookup_ns = elapsed_ns(rg_lookup_start, rg_lookup_end);
+        require(graph_lookup_ns < sql_lookup_ns,
+                "graph symbol lookup was not faster than SQL in graph test fixture");
+        require(graph_lookup_ns < rg_lookup_ns,
+                "graph symbol lookup was not faster than rg text search in graph test fixture");
+
+        bool found_file = false;
+        for (const auto& [path_id, file_id] : graph.file_by_path) {
+            (void)file_id;
+            if (graph.interner.view(path_id) == target_ref) {
+                found_file = true;
+                break;
+            }
+        }
+        require(found_file, "file_by_path did not include graph fixture path");
+
+        std::cout << "sql_ns_total: " << sql_ns << "\n";
+        std::cout << "csr_ns_total: " << csr_ns << "\n";
+        std::cout << "graph_lookup_ns_total: " << graph_lookup_ns << "\n";
+        std::cout << "sql_lookup_ns_total: " << sql_lookup_ns << "\n";
+        std::cout << "rg_lookup_ns_total: " << rg_lookup_ns << "\n";
+    }
+
+    std::filesystem::remove(db_path, ignored);
+
+    std::cout << "graph build: ok\n";
+    std::cout << "csr reverse memory: ok\n";
+    std::cout << "sorted symbol index: ok\n";
+    std::cout << "rg lookup comparison: ok\n";
+    std::cout << "sorted file index: ok\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
@@ -1302,6 +1645,7 @@ void print_usage() {
         << "  codegraph correct --reason R --affects P [--prefer G] [--avoid G]\n"
         << "  codegraph materialize\n"
         << "  codegraph memory-for <path-or-symbol>\n"
+        << "  codegraph bench lookup|memory-for|read <target> [repetitions]\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
         << "  codegraph test-storage\n"
@@ -1309,7 +1653,8 @@ void print_usage() {
         << "  codegraph test-index\n"
         << "  codegraph test-read\n"
         << "  codegraph test-materialize\n"
-        << "  codegraph test-memory\n";
+        << "  codegraph test-memory\n"
+        << "  codegraph test-graph\n";
 }
 
 
@@ -1369,6 +1714,14 @@ int main(int argc, char** argv) {
             return command_memory_for(argv[2]);
         }
 
+        if (argc >= 3 && std::strcmp(argv[1], "bench") == 0) {
+            std::vector<std::string> args;
+            for (int i = 2; i < argc; ++i) {
+                args.emplace_back(argv[i]);
+            }
+            return command_bench(args);
+        }
+
         if (argc == 3 && std::strcmp(argv[1], "parse-smoke") == 0) {
             return command_parse_smoke(argv[2]);
         }
@@ -1399,6 +1752,10 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-memory") == 0) {
             return command_test_memory_reads();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-graph") == 0) {
+            return command_test_graph();
         }
 
         print_usage();

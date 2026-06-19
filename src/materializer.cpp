@@ -3,14 +3,15 @@
 #include <algorithm>
 #include <fstream>
 #include <random>
-#include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
+#include "file_util.h"
 #include "hash_util.h"
 #include "resolver.h"
 #include "sqlite_util.h"
@@ -38,13 +39,7 @@ std::string trim_trailing_newlines(std::string value) {
 }
 
 std::string read_text_file(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        throw std::runtime_error("failed to read file: " + path.string());
-    }
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    return buffer.str();
+    return read_file_bytes(path);
 }
 
 void write_text_file(const std::filesystem::path& path, std::string_view contents) {
@@ -89,18 +84,23 @@ int64_t max_lamport_for_device(
         throw std::runtime_error("failed to read op log: " + path.string());
     }
 
-    int64_t max_lamport = 0;
+    std::string last_line;
     std::string line;
     while (std::getline(input, line)) {
         if (line.empty()) {
             continue;
         }
-        const json op = json::parse(line);
-        if (op.value("device_id", "") == device_id) {
-            max_lamport = std::max(max_lamport, op.value("lamport", int64_t{0}));
-        }
+        last_line = line;
     }
-    return max_lamport;
+    if (last_line.empty()) {
+        return 0;
+    }
+
+    const json op = json::parse(last_line);
+    if (op.value("device_id", "") != device_id) {
+        throw std::runtime_error("device op log contains an op for another device");
+    }
+    return op.value("lamport", int64_t{0});
 }
 
 std::string append_op(
@@ -188,10 +188,13 @@ std::vector<Operation> read_operations(const std::filesystem::path& codegraph_di
     return ops;
 }
 
-bool op_already_applied(Storage& storage, std::string_view op_id) {
-    Statement stmt(storage.handle(), "SELECT 1 FROM op_index WHERE op_id = ?;");
-    bind_text(stmt.get(), 1, op_id);
-    return stmt.step();
+std::unordered_set<std::string> load_applied_ops(Storage& storage) {
+    Statement stmt(storage.handle(), "SELECT op_id FROM op_index;");
+    std::unordered_set<std::string> applied;
+    while (stmt.step()) {
+        applied.insert(column_text(stmt.get(), 0));
+    }
+    return applied;
 }
 
 int64_t upsert_memory_node(
@@ -404,16 +407,18 @@ MaterializeResult materialize(
     const std::filesystem::path& codegraph_dir
 ) {
     const std::vector<Operation> ops = read_operations(codegraph_dir);
+    std::unordered_set<std::string> applied_ops = load_applied_ops(storage);
     MaterializeResult result;
 
     storage.execute("BEGIN IMMEDIATE;");
     try {
         for (const Operation& op : ops) {
-            if (op_already_applied(storage, op.op_id)) {
+            if (applied_ops.find(op.op_id) != applied_ops.end()) {
                 continue;
             }
             apply_operation(storage, op);
             mark_applied(storage, op);
+            applied_ops.insert(op.op_id);
             ++result.ops_applied;
         }
         result.edges_resolved = resolver_pass(storage);

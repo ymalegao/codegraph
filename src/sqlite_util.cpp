@@ -115,4 +115,13 @@ void bind_blob(sqlite3_stmt* stmt, int index, const std::vector<uint8_t>& bytes)
     check_sqlite(rc, sqlite3_db_handle(stmt), "failed to bind sqlite blob");
 }
 
+std::string column_text(sqlite3_stmt* stmt, int column) {
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, column));
+    if (text == nullptr) {
+        return {};
+    }
+    const int size = sqlite3_column_bytes(stmt, column);
+    return std::string(text, static_cast<size_t>(size));
+}
+
 }  // namespace codegraph

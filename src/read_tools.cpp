@@ -30,17 +30,12 @@ uint32_t checked_u32(int64_t value, std::string_view field) {
 }
 
 SymbolMatch symbol_match_from_statement(sqlite3_stmt* stmt) {
-    const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-    const auto* kind = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-    const auto* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-    const auto* qualified = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-
     SymbolMatch match;
     match.symbol_id = sqlite3_column_int64(stmt, 0);
-    match.path = path == nullptr ? "" : path;
-    match.kind = kind == nullptr ? "" : kind;
-    match.name = name == nullptr ? "" : name;
-    match.qualified_name = qualified == nullptr ? "" : qualified;
+    match.path = column_text(stmt, 1);
+    match.kind = column_text(stmt, 2);
+    match.name = column_text(stmt, 3);
+    match.qualified_name = column_text(stmt, 4);
     match.start_line = checked_u32(sqlite3_column_int64(stmt, 5), "start_line");
     match.end_line = checked_u32(sqlite3_column_int64(stmt, 6), "end_line");
     match.start_byte = checked_u32(sqlite3_column_int64(stmt, 7), "start_byte");
@@ -67,12 +62,10 @@ bool lookup_symbol(Storage& storage, std::string_view query, StoredSymbol& symbo
         return false;
     }
 
-    const auto* language = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 10));
-    const auto* file_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 11));
     symbol.match = symbol_match_from_statement(stmt.get());
     symbol.file_id = sqlite3_column_int64(stmt.get(), 9);
-    symbol.language = language == nullptr ? "" : language;
-    symbol.file_hash = file_hash == nullptr ? "" : file_hash;
+    symbol.language = column_text(stmt.get(), 10);
+    symbol.file_hash = column_text(stmt.get(), 11);
     return true;
 }
 
@@ -98,12 +91,10 @@ bool lookup_symbol_in_file(
         return false;
     }
 
-    const auto* language = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 10));
-    const auto* file_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 11));
     symbol.match = symbol_match_from_statement(stmt.get());
     symbol.file_id = sqlite3_column_int64(stmt.get(), 9);
-    symbol.language = language == nullptr ? "" : language;
-    symbol.file_hash = file_hash == nullptr ? "" : file_hash;
+    symbol.language = column_text(stmt.get(), 10);
+    symbol.file_hash = column_text(stmt.get(), 11);
     return true;
 }
 

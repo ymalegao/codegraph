@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Specification: `design_spec.md`
-- Current milestone completed in this handoff: Step 7, Memory reads
+- Current milestone completed in this handoff: Step 8, CSR + sorted indexes
 - Build system: CMake + Ninja
 - Executable target: `codegraph`
 
@@ -341,9 +341,53 @@ Added:
 
 Step 7 intentionally does not add:
 
-- CSR graph
 - MCP server
 - benchmark commands
+
+### Step 8: CSR + sorted indexes
+
+Implemented in:
+
+- `src/graph_store.h`
+- `src/graph_store.cpp`
+- `src/core.h`
+- `src/hash_util.h`
+- `src/hash_util.cpp`
+- `src/main.cpp`
+- `CMakeLists.txt`
+
+Added:
+
+- In-memory `Csr` and `Graph` containers.
+- `GraphIndex` snapshot built from SQLite.
+- `StringInterner` use for graph titles, file paths, qualified names, and signatures.
+- Node vector indexed by SQLite `node_id`, preserving `NodeId == array index`.
+- Symbol payload table (`SymbolData`) loaded from `symbols`.
+- Memory payload table (`MemoryData`) loaded from `memories`.
+- Forward CSR adjacency for resolved edges.
+- Reverse CSR adjacency for resolved edges.
+- Sorted exact `symbol_by_namehash` index.
+  - Includes both unqualified names and qualified names.
+- Sorted exact `file_by_path` index.
+- CLI command: `./build/codegraph bench lookup <symbol> [repetitions]`
+  - Compares exact graph symbol lookup, exact SQL symbol lookup, and `rg` fixed-string text search.
+  - Reports `rg_text_count` separately because `rg` is intentionally inexact and can include comments, calls, strings, and docs.
+- CLI command: `./build/codegraph bench memory-for <target> [repetitions]`
+  - Compares repeated SQL reverse-edge lookup against CSR reverse-edge traversal.
+- CLI command: `./build/codegraph bench read <symbol> [repetitions]`
+- Manual smoke command: `./build/codegraph test-graph`
+  - Builds an indexed fixture with many direct `affects` edges.
+  - Runs 10 SQL reverse-edge queries and 10 CSR reverse traversals.
+  - Verifies CSR and SQL counts match.
+  - Verifies CSR is faster on the fixture.
+  - Verifies `symbol_by_namehash` count matches SQL.
+  - Verifies exact graph symbol lookup is faster than SQL and `rg` on the fixture.
+  - Verifies `file_by_path` contains the fixture path.
+
+Step 8 intentionally does not add:
+
+- MCP server
+- doctor command
 
 ## Verification commands
 
@@ -358,6 +402,7 @@ cmake --build build
 ./build/codegraph test-read
 ./build/codegraph test-materialize
 ./build/codegraph test-memory
+./build/codegraph test-graph
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -366,14 +411,13 @@ cmake --build build
 
 ## Next milestone
 
-Step 8: CSR + sorted indexes.
+Step 9: MCP server.
 
 Scope from the spec:
 
-- Build in-memory graph structures from SQLite.
-- Add CSR forward and reverse adjacency.
-- Add exact sorted indexes such as `symbol_by_namehash` and `file_by_path`.
-- Keep SQLite as correctness source; use CSR/indexes as latency optimization.
-- Add benchmark command(s) for lookup and memory reads.
+- Add stdio JSON-RPC server.
+- Keep protocol responses on stdout only.
+- Send logs to stderr or `.codegraph/logs/mcp.log`.
+- Implement the agent-facing read/query tools from §10 over the existing CLI/read/materializer functionality.
 
-Do not implement MCP yet.
+Do not implement doctor/acceptance cleanup beyond what is needed for MCP.

@@ -5,6 +5,7 @@
 
 #include <sqlite3.h>
 
+#include "source_projection.h"
 #include "sqlite_util.h"
 
 namespace codegraph {
@@ -14,9 +15,8 @@ int64_t resolve_file(Storage& storage, std::string_view path) {
     Statement stmt(
         storage.handle(),
         "SELECT n.node_id "
-        "FROM files f JOIN nodes n ON n.kind = 'file' "
-        "AND n.stable_id LIKE ('file:%:' || f.path) "
-        "WHERE f.path = ? "
+        "FROM nodes n "
+        "WHERE n.kind = 'file' AND n.title = ? "
         "ORDER BY n.node_id LIMIT 1;"
     );
     bind_text(stmt.get(), 1, path);
@@ -26,44 +26,66 @@ int64_t resolve_file(Storage& storage, std::string_view path) {
     return sqlite3_column_int64(stmt.get(), 0);
 }
 
+std::vector<std::string> repo_ids_for_file(Storage& storage, std::string_view path) {
+    Statement stmt(
+        storage.handle(),
+        "SELECT stable_id FROM nodes WHERE kind = 'file' AND title = ? ORDER BY node_id;"
+    );
+    bind_text(stmt.get(), 1, path);
+
+    std::vector<std::string> repo_ids;
+    const std::string suffix = ":" + std::string(path);
+    while (stmt.step()) {
+        const std::string stable_id = column_text(stmt.get(), 0);
+        static constexpr std::string_view kPrefix = "file:";
+        if (stable_id.rfind(kPrefix, 0) != 0 || stable_id.size() <= kPrefix.size() + suffix.size()) {
+            continue;
+        }
+        if (stable_id.substr(stable_id.size() - suffix.size()) != suffix) {
+            continue;
+        }
+        repo_ids.push_back(stable_id.substr(kPrefix.size(), stable_id.size() - kPrefix.size() - suffix.size()));
+    }
+    return repo_ids;
+}
+
 int64_t resolve_symbol_in_file(
     Storage& storage,
     std::string_view path,
     std::string_view qualified_name
 ) {
-    Statement stmt(
-        storage.handle(),
-        "SELECT sn.node_id "
-        "FROM symbols s "
-        "JOIN files f ON f.file_id = s.file_id "
-        "JOIN nodes sn ON sn.kind = 'symbol' "
-        "AND sn.stable_id LIKE ('symbol:%:' || f.path || '::' || s.qualified_name) "
-        "WHERE f.path = ? AND s.qualified_name = ? "
-        "ORDER BY sn.node_id LIMIT 2;"
-    );
-    bind_text(stmt.get(), 1, path);
-    bind_text(stmt.get(), 2, qualified_name);
-
-    if (!stmt.step()) {
+    const std::vector<std::string> repo_ids = repo_ids_for_file(storage, path);
+    if (repo_ids.empty()) {
         return -1;
     }
-    const int64_t node_id = sqlite3_column_int64(stmt.get(), 0);
-    if (stmt.step()) {
-        return resolve_file(storage, path);
+
+    Statement stmt(
+        storage.handle(),
+        "SELECT node_id FROM nodes WHERE stable_id = ? AND kind = 'symbol';"
+    );
+
+    int64_t found = -1;
+    for (const std::string& repo_id : repo_ids) {
+        stmt.reset();
+        bind_text(stmt.get(), 1, symbol_stable_id(repo_id, path, qualified_name));
+        if (!stmt.step()) {
+            continue;
+        }
+        if (found >= 0) {
+            return resolve_file(storage, path);
+        }
+        found = sqlite3_column_int64(stmt.get(), 0);
     }
-    return node_id;
+    return found;
 }
 
 int64_t resolve_unique_symbol(Storage& storage, std::string_view qualified_name) {
     Statement stmt(
         storage.handle(),
-        "SELECT sn.node_id "
-        "FROM symbols s "
-        "JOIN files f ON f.file_id = s.file_id "
-        "JOIN nodes sn ON sn.kind = 'symbol' "
-        "AND sn.stable_id LIKE ('symbol:%:' || f.path || '::' || s.qualified_name) "
+        "SELECT n.node_id "
+        "FROM symbols s JOIN nodes n ON n.kind = 'symbol' AND n.title = s.qualified_name "
         "WHERE s.qualified_name = ? "
-        "ORDER BY sn.node_id LIMIT 2;"
+        "ORDER BY n.node_id LIMIT 2;"
     );
     bind_text(stmt.get(), 1, qualified_name);
 
@@ -112,10 +134,9 @@ uint32_t resolver_pass(Storage& storage) {
     };
     std::vector<PendingEdge> pending;
     while (select_edges.step()) {
-        const auto* to_ref = reinterpret_cast<const char*>(sqlite3_column_text(select_edges.get(), 1));
         pending.push_back(PendingEdge{
             sqlite3_column_int64(select_edges.get(), 0),
-            to_ref == nullptr ? "" : to_ref,
+            column_text(select_edges.get(), 1),
         });
     }
 
