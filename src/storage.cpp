@@ -4,28 +4,10 @@
 #include <stdexcept>
 #include <string>
 
+#include "sqlite_util.h"
+
 namespace codegraph {
 namespace {
-
-std::string sqlite_message(sqlite3* db, const char* fallback) {
-    if (db != nullptr) {
-        return sqlite3_errmsg(db);
-    }
-    return fallback;
-}
-
-void bind_text(sqlite3_stmt* stmt, int index, std::string_view value) {
-    const int rc = sqlite3_bind_text(
-        stmt,
-        index,
-        value.data(),
-        static_cast<int>(value.size()),
-        SQLITE_TRANSIENT
-    );
-    if (rc != SQLITE_OK) {
-        throw std::runtime_error("failed to bind sqlite text parameter");
-    }
-}
 
 constexpr const char* kSchemaSql = R"sql(
 PRAGMA foreign_keys = ON;
@@ -221,75 +203,30 @@ void Storage::execute(std::string_view sql) {
 
 bool Storage::object_exists(std::string_view type, std::string_view name) const {
     static constexpr const char* kSql =
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = ? AND name = ?;";
+        "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1;";
 
-    sqlite3_stmt* stmt = nullptr;
-    const int prepare_rc = sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr);
-    if (prepare_rc != SQLITE_OK) {
-        throw std::runtime_error(sqlite_message(db_, "failed to prepare sqlite query"));
-    }
-
-    try {
-        bind_text(stmt, 1, type);
-        bind_text(stmt, 2, name);
-
-        const int step_rc = sqlite3_step(stmt);
-        if (step_rc != SQLITE_ROW) {
-            throw std::runtime_error(sqlite_message(db_, "sqlite query returned no row"));
-        }
-
-        const bool exists = sqlite3_column_int64(stmt, 0) > 0;
-        sqlite3_finalize(stmt);
-        return exists;
-    } catch (...) {
-        sqlite3_finalize(stmt);
-        throw;
-    }
+    Statement stmt(db_, kSql);
+    bind_text(stmt.get(), 1, type);
+    bind_text(stmt.get(), 2, name);
+    return stmt.step();
 }
 
 int64_t Storage::query_int(std::string_view sql) const {
-    sqlite3_stmt* stmt = nullptr;
-    const std::string query(sql);
-    const int prepare_rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
-    if (prepare_rc != SQLITE_OK) {
-        throw std::runtime_error(sqlite_message(db_, "failed to prepare sqlite query"));
-    }
-
-    const int step_rc = sqlite3_step(stmt);
-    if (step_rc != SQLITE_ROW) {
-        const std::string message = sqlite_message(db_, "sqlite query returned no row");
-        sqlite3_finalize(stmt);
-        throw std::runtime_error(message);
-    }
-
-    const int64_t value = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    return value;
+    Statement stmt(db_, sql);
+    stmt.expect_row("sqlite integer query");
+    return sqlite3_column_int64(stmt.get(), 0);
 }
 
 std::vector<uint8_t> Storage::query_blob(std::string_view sql) const {
-    sqlite3_stmt* stmt = nullptr;
-    const std::string query(sql);
-    const int prepare_rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
-    if (prepare_rc != SQLITE_OK) {
-        throw std::runtime_error(sqlite_message(db_, "failed to prepare sqlite query"));
-    }
+    Statement stmt(db_, sql);
+    stmt.expect_row("sqlite blob query");
 
-    const int step_rc = sqlite3_step(stmt);
-    if (step_rc != SQLITE_ROW) {
-        const std::string message = sqlite_message(db_, "sqlite query returned no row");
-        sqlite3_finalize(stmt);
-        throw std::runtime_error(message);
-    }
-
-    const auto* data = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 0));
-    const int bytes = sqlite3_column_bytes(stmt, 0);
+    const auto* data = static_cast<const uint8_t*>(sqlite3_column_blob(stmt.get(), 0));
+    const int bytes = sqlite3_column_bytes(stmt.get(), 0);
     std::vector<uint8_t> result;
     if (data != nullptr && bytes > 0) {
         result.assign(data, data + bytes);
     }
-
-    sqlite3_finalize(stmt);
     return result;
 }
 

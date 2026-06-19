@@ -54,6 +54,8 @@ target_link_options(codegraph_sanitizers INTERFACE
 
 add_library(codegraph_core
   src/core.cpp
+  src/file_util.cpp
+  src/time_util.cpp
 )
 
 target_include_directories(codegraph_core PUBLIC
@@ -72,6 +74,7 @@ target_compile_options(codegraph_core PRIVATE
 
 add_library(codegraph_storage
   src/storage.cpp
+  src/sqlite_util.cpp
 )
 
 target_include_directories(codegraph_storage PUBLIC
@@ -89,6 +92,25 @@ target_compile_options(codegraph_storage PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_hash
+  src/hash_util.cpp
+)
+
+target_include_directories(codegraph_hash PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_hash PUBLIC
+  codegraph_sanitizers
+  PkgConfig::XXHASH
+)
+
+target_compile_options(codegraph_hash PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_library(codegraph_scanner
   src/scanner.cpp
 )
@@ -99,11 +121,34 @@ target_include_directories(codegraph_scanner PUBLIC
 
 target_link_libraries(codegraph_scanner PUBLIC
   codegraph_sanitizers
+  codegraph_hash
   codegraph_storage
-  PkgConfig::XXHASH
 )
 
 target_compile_options(codegraph_scanner PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
+add_library(codegraph_cpp_indexer
+  src/cpp_indexer.cpp
+)
+
+target_include_directories(codegraph_cpp_indexer PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_cpp_indexer PUBLIC
+  codegraph_sanitizers
+  codegraph_core
+  codegraph_hash
+  codegraph_storage
+  cpp-tree-sitter
+  tree-sitter-cpp
+)
+
+target_compile_options(codegraph_cpp_indexer PRIVATE
   -Wall
   -Wextra
   -Wpedantic
@@ -115,6 +160,8 @@ add_executable(codegraph
 
 target_link_libraries(codegraph PRIVATE
   codegraph_core
+  codegraph_cpp_indexer
+  codegraph_hash
   codegraph_storage
   codegraph_scanner
   codegraph_sanitizers

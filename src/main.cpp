@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core.h"
+#include "cpp_indexer.h"
 #include "scanner.h"
 #include "storage.h"
 
@@ -462,6 +463,36 @@ int command_scan() {
     return 0;
 }
 
+int command_index() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+
+    std::filesystem::create_directories(db_path.parent_path());
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    const codegraph::ScanResult scan_result = codegraph::scan_repository(
+        storage,
+        codegraph::ScanOptions{repo_root}
+    );
+    const codegraph::IndexResult index_result = codegraph::index_cpp_repository(
+        storage,
+        codegraph::IndexOptions{repo_root}
+    );
+
+    std::cout << "index: ok\n";
+    std::cout << "repo: " << repo_root.generic_string() << "\n";
+    std::cout << "db: " << db_path.generic_string() << "\n";
+    std::cout << "scan_files_seen: " << scan_result.files_seen << "\n";
+    std::cout << "scan_files_indexed: " << scan_result.files_indexed << "\n";
+    std::cout << "scan_files_unchanged: " << scan_result.files_unchanged << "\n";
+    std::cout << "indexed_files: " << index_result.files_indexed << "\n";
+    std::cout << "symbols_indexed: " << index_result.symbols_indexed << "\n";
+    std::cout << "contains_edges: " << index_result.contains_edges << "\n";
+    std::cout << "imports_edges: " << index_result.imports_edges << "\n";
+    return 0;
+}
+
 int command_test_scan() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path =
@@ -532,17 +563,120 @@ int command_test_scan() {
     return 0;
 }
 
+int command_test_index() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-index.sqlite";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+
+    codegraph::IndexResult index_result;
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+        (void)codegraph::scan_repository(storage, codegraph::ScanOptions{repo_root});
+        index_result = codegraph::index_cpp_repository(storage, codegraph::IndexOptions{repo_root});
+
+        require(index_result.files_indexed > 0, "indexer did not index any C++ files");
+        require(index_result.symbols_indexed > 0, "indexer did not extract any symbols");
+
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'demo';") == 1,
+            "indexer did not extract namespace demo"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'demo::Greeter';") == 1,
+            "indexer did not extract class demo::Greeter"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'demo::Greeter::hello';") == 1,
+            "indexer did not extract method demo::Greeter::hello"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'demo::add';") == 1,
+            "indexer did not extract function demo::add"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'main' "
+                              "AND file_id = (SELECT file_id FROM files WHERE path = 'testing/sample.cpp');") == 1,
+            "indexer did not extract function main"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE kind = 'method' "
+                              "AND qualified_name = 'demo::Greeter::hello';") == 1,
+            "indexer did not classify class function as method"
+        );
+
+        const int64_t start_byte = storage.query_int(
+            "SELECT start_byte FROM symbols WHERE qualified_name = 'demo::add' "
+            "AND file_id = (SELECT file_id FROM files WHERE path = 'testing/sample.cpp');"
+        );
+        const int64_t end_byte = storage.query_int(
+            "SELECT end_byte FROM symbols WHERE qualified_name = 'demo::add' "
+            "AND file_id = (SELECT file_id FROM files WHERE path = 'testing/sample.cpp');"
+        );
+        const std::string sample = read_file("testing/sample.cpp");
+        const std::string add_body = sample.substr(
+            static_cast<size_t>(start_byte),
+            static_cast<size_t>(end_byte - start_byte)
+        );
+        require(
+            add_body == "int add(int a, int b) {\n    return a + b;\n}",
+            "indexer stored an inexact span for demo::add"
+        );
+
+        require(
+            storage.query_int("SELECT COUNT(*) FROM fts_symbols WHERE fts_symbols MATCH 'Greeter';") >= 1,
+            "fts_symbols was not populated by indexed symbols"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'contains';") >=
+                storage.query_int("SELECT COUNT(*) FROM symbols;"),
+            "indexer did not create enough Contains edges"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM edges WHERE kind = 'imports' AND to_ref = 'iostream';") >= 1,
+            "indexer did not create Imports edge for #include <iostream>"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM edges WHERE kind NOT IN ('contains', 'imports');") == 0,
+            "indexer created an edge kind outside Step 4 scope"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE file_id IN "
+                              "(SELECT file_id FROM files WHERE path = 'testing/sample.py');") == 0,
+            "indexer extracted Python symbols during C++ milestone"
+        );
+    }
+
+    std::filesystem::remove(db_path, ignored);
+
+    std::cout << "index symbols: ok\n";
+    std::cout << "index spans: ok\n";
+    std::cout << "index fts: ok\n";
+    std::cout << "index edges: ok\n";
+    std::cout << "indexed_files: " << index_result.files_indexed << "\n";
+    std::cout << "symbols_indexed: " << index_result.symbols_indexed << "\n";
+    std::cout << "contains_edges: " << index_result.contains_edges << "\n";
+    std::cout << "imports_edges: " << index_result.imports_edges << "\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
         << "  codegraph --version\n"
         << "  codegraph doctor-deps\n"
         << "  codegraph scan\n"
+        << "  codegraph index\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
         << "  codegraph test-storage\n"
-        << "  codegraph test-scan\n";
+        << "  codegraph test-scan\n"
+        << "  codegraph test-index\n";
 }
+
 
 }  // namespace
 
@@ -560,6 +694,10 @@ int main(int argc, char** argv) {
             return command_scan();
         }
 
+        if (argc == 2 && std::strcmp(argv[1], "index") == 0) {
+            return command_index();
+        }
+
         if (argc == 3 && std::strcmp(argv[1], "parse-smoke") == 0) {
             return command_parse_smoke(argv[2]);
         }
@@ -575,6 +713,10 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::strcmp(argv[1], "test-scan") == 0) {
             return command_test_scan();
         }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-index") == 0) {
+            return command_test_index();
+            }
 
         print_usage();
         return 2;
