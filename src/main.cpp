@@ -13,6 +13,7 @@
 #include "cpp_frontend.h"
 #include "indexer.h"
 #include "materializer.h"
+#include "memory_reads.h"
 #include "read_tools.h"
 #include "scanner.h"
 #include "storage.h"
@@ -719,6 +720,40 @@ int command_correct(const std::vector<std::string>& args) {
     return 0;
 }
 
+void print_memory_view(const codegraph::MemoryView& memory) {
+    std::cout << "- " << memory.title << "\n";
+    std::cout << "  type: " << memory.memory_type << "\n";
+    std::cout << "  body: " << memory.body << "\n";
+    std::cout << "  provenance: " << memory.provenance << "\n";
+    for (const codegraph::PathRuleView& rule : memory.path_rules) {
+        std::cout << "  rule: " << rule.rule_kind << " " << rule.pattern << "\n";
+        if (!rule.reason.empty()) {
+            std::cout << "  reason: " << rule.reason << "\n";
+        }
+    }
+}
+
+int command_memory_for(const std::string& target) {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+    const codegraph::MemoryReadResult result =
+        codegraph::memory_for_target(storage, target);
+
+    std::cout << "target: " << result.target << "\n";
+    std::cout << "corrections: " << result.corrections.size() << "\n";
+    for (const codegraph::MemoryView& memory : result.corrections) {
+        print_memory_view(memory);
+    }
+    std::cout << "decisions: " << result.decisions.size() << "\n";
+    for (const codegraph::MemoryView& memory : result.decisions) {
+        print_memory_view(memory);
+    }
+    return 0;
+}
+
 int command_test_scan() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path =
@@ -1154,6 +1189,105 @@ int command_test_materialize() {
     return 0;
 }
 
+int command_test_memory_reads() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-memory.sqlite";
+    const std::filesystem::path codegraph_dir =
+        repo_root / "build" / "codegraph-test-memory-cg";
+    const std::filesystem::path fixture_dir =
+        repo_root / "testing" / "codegraph_mem";
+    const std::filesystem::path resdb_file =
+        fixture_dir / "resdb" / "app" / "x.cc";
+    const std::string resdb_ref = "testing/codegraph_mem/resdb/app/x.cc";
+    const std::string bftsmart_ref = "testing/codegraph_mem/bftsmart/y.h";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+    std::filesystem::remove_all(codegraph_dir, ignored);
+    std::filesystem::remove_all(fixture_dir, ignored);
+    RemoveTreeOnExit remove_codegraph_dir{codegraph_dir};
+    RemoveTreeOnExit remove_fixture_dir{fixture_dir};
+
+    std::filesystem::create_directories(resdb_file.parent_path());
+    write_file(
+        resdb_file,
+        "namespace memory_fixture {\n"
+        "int anchor() {\n"
+        "    return 1;\n"
+        "}\n"
+        "}\n"
+    );
+
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+
+        (void)codegraph::append_correction_op(
+            codegraph_dir,
+            codegraph::CorrectionInput{
+                "Prefer ResDB fixture",
+                "Use the ResDB fixture path.",
+                {"testing/codegraph_mem/resdb/**"},
+                {"testing/codegraph_mem/bftsmart/**"},
+                {resdb_ref},
+            }
+        );
+        (void)codegraph::append_decision_op(
+            codegraph_dir,
+            codegraph::DecisionInput{
+                "Anchor memory fixture",
+                "The ResDB fixture anchors memory read tests.",
+                {resdb_ref},
+            }
+        );
+        const codegraph::MaterializeResult materialized =
+            codegraph::materialize(storage, codegraph_dir);
+        require(materialized.ops_applied == 2U, "memory read setup did not materialize two ops");
+
+        const codegraph::MemoryReadResult resdb_memory =
+            codegraph::memory_for_target(storage, resdb_ref);
+        require(resdb_memory.corrections.size() == 1U,
+                "memory-for resdb fixture did not return one correction");
+        require(resdb_memory.decisions.size() == 1U,
+                "memory-for resdb fixture did not return one decision");
+        require(
+            resdb_memory.corrections[0].body == "Use the ResDB fixture path.",
+            "memory-for resdb fixture did not include correction reason"
+        );
+        bool saw_prefer = false;
+        for (const codegraph::PathRuleView& rule : resdb_memory.corrections[0].path_rules) {
+            saw_prefer = saw_prefer || rule.rule_kind == "prefer";
+        }
+        require(saw_prefer, "memory-for resdb fixture did not show prefer rule");
+
+        const codegraph::MemoryReadResult bftsmart_memory =
+            codegraph::memory_for_target(storage, bftsmart_ref);
+        require(bftsmart_memory.corrections.size() == 1U,
+                "memory-for bftsmart fixture did not return avoid correction");
+        bool saw_avoid = false;
+        for (const codegraph::PathRuleView& rule : bftsmart_memory.corrections[0].path_rules) {
+            saw_avoid = saw_avoid || rule.rule_kind == "avoid";
+        }
+        require(saw_avoid, "memory-for bftsmart fixture did not show avoid rule");
+
+        const codegraph::MemoryReadResult symbol_memory =
+            codegraph::memory_for_target(storage, resdb_ref + "::memory_fixture::anchor");
+        require(symbol_memory.corrections.size() == 1U,
+                "memory-for symbol did not include file path rule correction");
+    }
+
+    std::filesystem::remove(db_path, ignored);
+
+    std::cout << "memory-for file: ok\n";
+    std::cout << "memory-for path rules: ok\n";
+    std::cout << "memory-for symbol: ok\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
@@ -1167,13 +1301,15 @@ void print_usage() {
         << "  codegraph remember --title T --body B --affects P [--affects P2 ...]\n"
         << "  codegraph correct --reason R --affects P [--prefer G] [--avoid G]\n"
         << "  codegraph materialize\n"
+        << "  codegraph memory-for <path-or-symbol>\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
         << "  codegraph test-storage\n"
         << "  codegraph test-scan\n"
         << "  codegraph test-index\n"
         << "  codegraph test-read\n"
-        << "  codegraph test-materialize\n";
+        << "  codegraph test-materialize\n"
+        << "  codegraph test-memory\n";
 }
 
 
@@ -1229,6 +1365,10 @@ int main(int argc, char** argv) {
             return command_correct(args);
         }
 
+        if (argc == 3 && std::strcmp(argv[1], "memory-for") == 0) {
+            return command_memory_for(argv[2]);
+        }
+
         if (argc == 3 && std::strcmp(argv[1], "parse-smoke") == 0) {
             return command_parse_smoke(argv[2]);
         }
@@ -1255,6 +1395,10 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-materialize") == 0) {
             return command_test_materialize();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-memory") == 0) {
+            return command_test_memory_reads();
         }
 
         print_usage();

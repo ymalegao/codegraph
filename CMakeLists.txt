@@ -280,6 +280,26 @@ target_compile_options(codegraph_materializer PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_memory_reads
+  src/memory_reads.cpp
+)
+
+target_include_directories(codegraph_memory_reads PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_memory_reads PUBLIC
+  codegraph_sanitizers
+  codegraph_resolver
+  codegraph_storage
+)
+
+target_compile_options(codegraph_memory_reads PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_executable(codegraph
   src/main.cpp
 )
@@ -291,6 +311,7 @@ target_link_libraries(codegraph PRIVATE
   codegraph_hash
   codegraph_indexer
   codegraph_materializer
+  codegraph_memory_reads
   codegraph_read_tools
   codegraph_resolver
   codegraph_source_projection

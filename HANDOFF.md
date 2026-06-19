@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Specification: `design_spec.md`
-- Current milestone completed in this handoff: Step 6, Op log + materializer
+- Current milestone completed in this handoff: Step 7, Memory reads
 - Build system: CMake + Ninja
 - Executable target: `codegraph`
 
@@ -305,7 +305,42 @@ Added:
 
 Step 6 intentionally does not add:
 
-- Memory read commands
+- CSR graph
+- MCP server
+- benchmark commands
+
+### Step 7: Memory reads
+
+Implemented in:
+
+- `src/memory_reads.h`
+- `src/memory_reads.cpp`
+- `src/main.cpp`
+- `CMakeLists.txt`
+
+Added:
+
+- SQLite-backed memory reads for the current milestone.
+  - CSR is not required yet; Step 8 remains the latency/indexing milestone.
+- Reverse `affects` lookup:
+  - Resolve a file/symbol target to a source node.
+  - Query `edges` where `kind='affects'` and `to_node` is that source node.
+  - Join back to `memories` for correction/decision content.
+- Path-rule lookup for corrections:
+  - Match `path_rules.pattern` globs against the requested path.
+  - Supports `*` and `**` glob behavior.
+  - Returns matching `prefer`/`avoid` rule provenance and reason.
+- CLI command: `./build/codegraph memory-for <path-or-symbol>`
+  - Prints corrections and decisions for a file path or `path::qualified_name`.
+  - Shows correction path rules and reasons.
+- Manual smoke command: `./build/codegraph test-memory`
+  - Verifies `memory-for` on a ResDB-like path shows the prefer correction and reason.
+  - Verifies `memory-for` on a BFT-SMaRt-like path shows the avoid correction.
+  - Verifies a directly affected file shows an architecture decision.
+  - Verifies symbol-target memory includes matching file path rules.
+
+Step 7 intentionally does not add:
+
 - CSR graph
 - MCP server
 - benchmark commands
@@ -322,6 +357,7 @@ cmake --build build
 ./build/codegraph test-index
 ./build/codegraph test-read
 ./build/codegraph test-materialize
+./build/codegraph test-memory
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -330,15 +366,14 @@ cmake --build build
 
 ## Next milestone
 
-Step 7: Memory reads.
+Step 8: CSR + sorted indexes.
 
 Scope from the spec:
 
-- Implement `get_memory_for_file` behavior via reverse `Affects` edges.
-- Implement `get_memory_for_symbol` behavior via reverse `Affects` edges.
-- Add CLI inspection command(s), likely `memory-for <path-or-symbol>`.
-- Include correction titles, prefer/avoid rules, and reasons.
-- Include architecture decision titles and bodies.
-- Verify a correction on `resdb/**`-style paths is returned with reason for affected files.
+- Build in-memory graph structures from SQLite.
+- Add CSR forward and reverse adjacency.
+- Add exact sorted indexes such as `symbol_by_namehash` and `file_by_path`.
+- Keep SQLite as correctness source; use CSR/indexes as latency optimization.
+- Add benchmark command(s) for lookup and memory reads.
 
-Do not implement CSR, MCP, or benchmarks.
+Do not implement MCP yet.
