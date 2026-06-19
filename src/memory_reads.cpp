@@ -5,6 +5,7 @@
 
 #include <sqlite3.h>
 
+#include "core.h"
 #include "resolver.h"
 #include "sqlite_util.h"
 
@@ -70,9 +71,10 @@ void merge_memory(std::vector<MemoryView>& memories, MemoryView memory) {
 }
 
 void add_memory(MemoryReadResult& result, MemoryView memory) {
-    if (memory.memory_type == "correction") {
+    const MemoryType memory_type = memory_type_from_string(memory.memory_type);
+    if (memory_type == MemoryType::Correction) {
         merge_memory(result.corrections, std::move(memory));
-    } else if (memory.memory_type == "arch_decision") {
+    } else if (memory_type == MemoryType::ArchDecision) {
         merge_memory(result.decisions, std::move(memory));
     }
 }

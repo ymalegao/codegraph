@@ -234,6 +234,12 @@ Added:
 - CLI command: `./build/codegraph find-symbol <name>`
   - Finds exact `qualified_name` or `name` matches.
   - Also includes simple qualified-name substring matching for local inspection.
+- CLI command: `./build/codegraph search-symbol <query> [--kind K] [--limit N]`
+  - Searches `fts_symbols` with BM25 ranking.
+  - Sanitizes raw input into quoted FTS terms so punctuation such as `:`, `*`, `-`, and `(` does not throw FTS syntax errors.
+  - Supports optional symbol kind filtering.
+  - Returns symbol ids, qualified names, file locations, kind, signature, and score.
+  - Does not return source bodies; callers should use `read-symbol` for verified reads.
 - CLI command: `./build/codegraph read-symbol <name>`
   - Reads a complete symbol body by exact stored byte span when the live file hash matches the cached hash.
   - Re-runs `scan_repository` + `index_repository` internally when the live file hash differs.
@@ -244,6 +250,9 @@ Added:
   - Includes the live file hash.
 - Manual smoke command: `./build/codegraph test-read`
   - Verifies `find-symbol` finds an indexed test symbol.
+  - Verifies `search-symbol` handles unsafe raw FTS punctuation.
+  - Verifies `search-symbol` ranks a name hit above a signature-only hit.
+  - Verifies `search-symbol` applies limits and returns signatures/locations.
   - Verifies `read-symbol` returns the exact initial body.
   - Verifies `read-file` returns an exact line range.
   - Edits the backing file so the symbol moves and changes body.

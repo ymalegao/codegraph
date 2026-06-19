@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "frontend.h"
@@ -30,6 +32,17 @@ struct SymbolMatch {
     uint32_t end_byte = 0;
 };
 
+struct SymbolSearchMatch {
+    int64_t symbol_id = 0;
+    std::string qualified_name;
+    std::string path;
+    uint32_t start_line = 0;
+    uint32_t end_line = 0;
+    std::string kind;
+    std::string signature;
+    double score = 0.0;
+};
+
 struct ReadSymbolResult {
     ReadStatus status = ReadStatus::NotFound;
     SymbolMatch symbol;
@@ -50,6 +63,13 @@ std::string_view read_status_name(ReadStatus status);
 std::vector<SymbolMatch> find_symbols(
     Storage& storage,
     std::string_view query,
+    uint32_t limit = 20
+);
+
+std::vector<SymbolSearchMatch> search_symbols(
+    Storage& storage,
+    std::string_view query,
+    std::optional<std::string_view> kind = std::nullopt,
     uint32_t limit = 20
 );
 

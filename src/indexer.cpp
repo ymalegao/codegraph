@@ -1,6 +1,7 @@
 #include "indexer.h"
 
 #include <filesystem>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -56,6 +57,7 @@ int64_t upsert_source_node(
     bind_text(upsert_node_stmt.get(), 2, kind);
     bind_text(upsert_node_stmt.get(), 3, title);
     bind_text(upsert_node_stmt.get(), 4, created_at);
+    bind_text(upsert_node_stmt.get(), 5, status_text(Status::Active));
     upsert_node_stmt.expect_done("upsert source node");
 
     select_node_stmt.reset();
@@ -67,7 +69,7 @@ int64_t upsert_source_node(
 int64_t insert_symbol_row(sqlite3* db, Statement& insert_symbol_stmt, const FileRow& file, const SymbolInfo& symbol) {
     insert_symbol_stmt.reset();
     bind_int64(insert_symbol_stmt.get(), 1, file.file_id);
-    bind_text(insert_symbol_stmt.get(), 2, symbol.kind);
+    bind_text(insert_symbol_stmt.get(), 2, symbol_kind_text(symbol_kind_from_string(symbol.kind)));
     bind_text(insert_symbol_stmt.get(), 3, symbol.name);
     bind_text(insert_symbol_stmt.get(), 4, symbol.qualified_name);
     bind_text(insert_symbol_stmt.get(), 5, symbol.signature);
@@ -118,9 +120,9 @@ IndexResult index_repository(
     Statement upsert_node(
         storage.handle(),
         "INSERT INTO nodes(stable_id, kind, title, created_at, status) "
-        "VALUES (?, ?, ?, ?, 'active') "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(stable_id) DO UPDATE SET "
-        "kind = excluded.kind, title = excluded.title, status = 'active';"
+        "kind = excluded.kind, title = excluded.title, status = excluded.status;"
     );
     Statement select_node(storage.handle(), "SELECT node_id FROM nodes WHERE stable_id = ?;");
     Statement insert_symbol(
@@ -166,7 +168,7 @@ IndexResult index_repository(
                     upsert_node,
                     select_node,
                     file_stable,
-                    "file",
+                    node_kind_text(NodeKind::File),
                     file.path
                 );
 
@@ -188,7 +190,7 @@ IndexResult index_repository(
                         upsert_node,
                         select_node,
                         stable,
-                        "symbol",
+                        node_kind_text(NodeKind::Symbol),
                         symbol.qualified_name
                     );
                     symbols.push_back(IndexedSymbol{symbol, symbol_node_id});
@@ -201,12 +203,26 @@ IndexResult index_repository(
                         symbol.parent_index >= 0
                             ? symbols[static_cast<size_t>(symbol.parent_index)].node_id
                             : file_node_id;
-                    insert_edge_row(insert_edge, parent_node, symbols[i].node_id, "", "contains", true);
+                    insert_edge_row(
+                        insert_edge,
+                        parent_node,
+                        symbols[i].node_id,
+                        "",
+                        edge_kind_text(EdgeKind::Contains),
+                        true
+                    );
                     ++result.contains_edges;
                 }
 
                 for (const IncludeInfo& include : extracted.includes) {
-                    insert_edge_row(insert_edge, file_node_id, -1, include.target, "imports", false);
+                    insert_edge_row(
+                        insert_edge,
+                        file_node_id,
+                        -1,
+                        include.target,
+                        edge_kind_text(EdgeKind::Imports),
+                        false
+                    );
                     ++result.imports_edges;
                 }
 

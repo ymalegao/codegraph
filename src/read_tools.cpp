@@ -1,13 +1,15 @@
 #include "read_tools.h"
 
 #include <algorithm>
-#include <limits>
+#include <cctype>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 #include <sqlite3.h>
 
 #include "file_util.h"
+#include "core.h"
 #include "hash_util.h"
 #include "scanner.h"
 #include "sqlite_util.h"
@@ -22,13 +24,6 @@ struct StoredSymbol {
     std::string file_hash;
 };
 
-uint32_t checked_u32(int64_t value, std::string_view field) {
-    if (value < 0 || value > std::numeric_limits<uint32_t>::max()) {
-        throw std::runtime_error(std::string(field) + " is outside uint32_t range");
-    }
-    return static_cast<uint32_t>(value);
-}
-
 SymbolMatch symbol_match_from_statement(sqlite3_stmt* stmt) {
     SymbolMatch match;
     match.symbol_id = sqlite3_column_int64(stmt, 0);
@@ -41,6 +36,63 @@ SymbolMatch symbol_match_from_statement(sqlite3_stmt* stmt) {
     match.start_byte = checked_u32(sqlite3_column_int64(stmt, 7), "start_byte");
     match.end_byte = checked_u32(sqlite3_column_int64(stmt, 8), "end_byte");
     return match;
+}
+
+SymbolSearchMatch symbol_search_match_from_statement(sqlite3_stmt* stmt) {
+    SymbolSearchMatch match;
+    match.symbol_id = sqlite3_column_int64(stmt, 0);
+    match.qualified_name = column_text(stmt, 1);
+    match.path = column_text(stmt, 2);
+    match.start_line = checked_u32(sqlite3_column_int64(stmt, 3), "start_line");
+    match.end_line = checked_u32(sqlite3_column_int64(stmt, 4), "end_line");
+    match.kind = column_text(stmt, 5);
+    match.signature = column_text(stmt, 6);
+    match.score = sqlite3_column_double(stmt, 7);
+    return match;
+}
+
+bool is_fts_token_char(unsigned char ch) {
+    return std::isalnum(ch) != 0 || ch == '_';
+}
+
+std::string fts_quote(std::string_view term) {
+    std::string quoted = "\"";
+    for (const char ch : term) {
+        if (ch == '"') {
+            quoted += "\"\"";
+        } else {
+            quoted += ch;
+        }
+    }
+    quoted += "\"";
+    return quoted;
+}
+
+std::string sanitize_fts_query(std::string_view query) {
+    std::vector<std::string> terms;
+    std::string current;
+    for (const unsigned char ch : query) {
+        if (is_fts_token_char(ch)) {
+            current.push_back(static_cast<char>(ch));
+            continue;
+        }
+        if (!current.empty()) {
+            terms.push_back(std::move(current));
+            current.clear();
+        }
+    }
+    if (!current.empty()) {
+        terms.push_back(std::move(current));
+    }
+
+    std::string sanitized;
+    for (const std::string& term : terms) {
+        if (!sanitized.empty()) {
+            sanitized += " ";
+        }
+        sanitized += fts_quote(term);
+    }
+    return sanitized;
 }
 
 bool lookup_symbol(Storage& storage, std::string_view query, StoredSymbol& symbol) {
@@ -143,6 +195,46 @@ std::vector<SymbolMatch> find_symbols(Storage& storage, std::string_view query, 
     std::vector<SymbolMatch> matches;
     while (stmt.step()) {
         matches.push_back(symbol_match_from_statement(stmt.get()));
+    }
+    return matches;
+}
+
+std::vector<SymbolSearchMatch> search_symbols(
+    Storage& storage,
+    std::string_view query,
+    std::optional<std::string_view> kind,
+    uint32_t limit
+) {
+    const std::string match_query = sanitize_fts_query(query);
+    if (match_query.empty() || limit == 0) {
+        return {};
+    }
+
+    std::string normalized_kind;
+    if (kind.has_value() && !kind->empty()) {
+        normalized_kind = std::string(symbol_kind_text(symbol_kind_from_string(*kind)));
+    }
+
+    Statement stmt(
+        storage.handle(),
+        "SELECT s.symbol_id, s.qualified_name, f.path, s.start_line, s.end_line, "
+        "s.kind, COALESCE(s.signature, ''), bm25(fts_symbols, 10.0, 5.0, 1.0) AS score "
+        "FROM fts_symbols "
+        "JOIN symbols s ON s.symbol_id = fts_symbols.rowid "
+        "JOIN files f ON f.file_id = s.file_id "
+        "WHERE fts_symbols MATCH ? "
+        "AND (? = '' OR s.kind = ?) "
+        "ORDER BY score, f.path, s.start_line "
+        "LIMIT ?;"
+    );
+    bind_text(stmt.get(), 1, match_query);
+    bind_text(stmt.get(), 2, normalized_kind);
+    bind_text(stmt.get(), 3, normalized_kind);
+    bind_int64(stmt.get(), 4, limit);
+
+    std::vector<SymbolSearchMatch> matches;
+    while (stmt.step()) {
+        matches.push_back(symbol_search_match_from_statement(stmt.get()));
     }
     return matches;
 }

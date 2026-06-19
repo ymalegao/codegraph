@@ -1,5 +1,6 @@
 #include "sqlite_util.h"
 
+#include <limits>
 #include <stdexcept>
 
 namespace codegraph {
@@ -122,6 +123,13 @@ std::string column_text(sqlite3_stmt* stmt, int column) {
     }
     const int size = sqlite3_column_bytes(stmt, column);
     return std::string(text, static_cast<size_t>(size));
+}
+
+uint32_t checked_u32(int64_t value, std::string_view field) {
+    if (value < 0 || value > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error(std::string(field) + " is outside uint32_t range");
+    }
+    return static_cast<uint32_t>(value);
 }
 
 }  // namespace codegraph

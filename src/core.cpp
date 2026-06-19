@@ -18,6 +18,45 @@ uint32_t checked_u32_size(size_t value, const char* label) {
 
 }  // namespace
 
+NodeKind node_kind_from_string(std::string_view kind) {
+    if (kind == KindText::File) return NodeKind::File;
+    if (kind == KindText::Symbol) return NodeKind::Symbol;
+    if (kind == KindText::Correction) return NodeKind::Correction;
+    if (kind == KindText::ArchDecision) return NodeKind::ArchDecision;
+    throw std::runtime_error("unknown node kind: " + std::string(kind));
+}
+
+SymbolKind symbol_kind_from_string(std::string_view kind) {
+    if (kind == KindText::Function) return SymbolKind::Function;
+    if (kind == KindText::Method) return SymbolKind::Method;
+    if (kind == KindText::Class) return SymbolKind::Class;
+    if (kind == KindText::Struct) return SymbolKind::Struct;
+    if (kind == KindText::Namespace) return SymbolKind::Namespace;
+    if (kind == KindText::Enum) return SymbolKind::Enum;
+    if (kind == KindText::Field) return SymbolKind::Field;
+    return SymbolKind::Other;
+}
+
+EdgeKind edge_kind_from_string(std::string_view kind) {
+    if (kind == KindText::Contains) return EdgeKind::Contains;
+    if (kind == KindText::Imports) return EdgeKind::Imports;
+    if (kind == KindText::Affects) return EdgeKind::Affects;
+    throw std::runtime_error("unknown edge kind: " + std::string(kind));
+}
+
+Status status_from_string(std::string_view status) {
+    if (status == KindText::Active) return Status::Active;
+    if (status == KindText::Tombstoned) return Status::Tombstoned;
+    if (status == KindText::Stale) return Status::Stale;
+    return Status::Active;
+}
+
+MemoryType memory_type_from_string(std::string_view type) {
+    if (type == KindText::Correction) return MemoryType::Correction;
+    if (type == KindText::ArchDecision) return MemoryType::ArchDecision;
+    return MemoryType::Unknown;
+}
+
 StringInterner::StringInterner() : starts_{0} {}
 
 StringId StringInterner::intern(std::string_view text) {

@@ -25,6 +25,85 @@ enum class SymbolKind : uint8_t {
 };
 enum class EdgeKind : uint8_t { Contains, Imports, Affects };
 enum class Status : uint8_t { Active, Tombstoned, Stale };
+enum class MemoryType : uint8_t { Correction = 0, ArchDecision = 1, Unknown = 255 };
+
+namespace KindText {
+inline constexpr std::string_view File = "file";
+inline constexpr std::string_view Symbol = "symbol";
+inline constexpr std::string_view Correction = "correction";
+inline constexpr std::string_view ArchDecision = "arch_decision";
+inline constexpr std::string_view Function = "function";
+inline constexpr std::string_view Method = "method";
+inline constexpr std::string_view Class = "class";
+inline constexpr std::string_view Struct = "struct";
+inline constexpr std::string_view Namespace = "namespace";
+inline constexpr std::string_view Enum = "enum";
+inline constexpr std::string_view Field = "field";
+inline constexpr std::string_view Other = "other";
+inline constexpr std::string_view Contains = "contains";
+inline constexpr std::string_view Imports = "imports";
+inline constexpr std::string_view Affects = "affects";
+inline constexpr std::string_view Active = "active";
+inline constexpr std::string_view Tombstoned = "tombstoned";
+inline constexpr std::string_view Stale = "stale";
+}  // namespace KindText
+
+constexpr std::string_view node_kind_text(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::File: return KindText::File;
+        case NodeKind::Symbol: return KindText::Symbol;
+        case NodeKind::Correction: return KindText::Correction;
+        case NodeKind::ArchDecision: return KindText::ArchDecision;
+    }
+    return KindText::File;
+}
+
+constexpr std::string_view symbol_kind_text(SymbolKind kind) {
+    switch (kind) {
+        case SymbolKind::Function: return KindText::Function;
+        case SymbolKind::Method: return KindText::Method;
+        case SymbolKind::Class: return KindText::Class;
+        case SymbolKind::Struct: return KindText::Struct;
+        case SymbolKind::Namespace: return KindText::Namespace;
+        case SymbolKind::Enum: return KindText::Enum;
+        case SymbolKind::Field: return KindText::Field;
+        case SymbolKind::Other: return KindText::Other;
+    }
+    return KindText::Other;
+}
+
+constexpr std::string_view edge_kind_text(EdgeKind kind) {
+    switch (kind) {
+        case EdgeKind::Contains: return KindText::Contains;
+        case EdgeKind::Imports: return KindText::Imports;
+        case EdgeKind::Affects: return KindText::Affects;
+    }
+    return KindText::Contains;
+}
+
+constexpr std::string_view status_text(Status status) {
+    switch (status) {
+        case Status::Active: return KindText::Active;
+        case Status::Tombstoned: return KindText::Tombstoned;
+        case Status::Stale: return KindText::Stale;
+    }
+    return KindText::Active;
+}
+
+constexpr std::string_view memory_type_text(MemoryType type) {
+    switch (type) {
+        case MemoryType::Correction: return KindText::Correction;
+        case MemoryType::ArchDecision: return KindText::ArchDecision;
+        case MemoryType::Unknown: return KindText::Other;
+    }
+    return KindText::Other;
+}
+
+NodeKind node_kind_from_string(std::string_view kind);
+SymbolKind symbol_kind_from_string(std::string_view kind);
+EdgeKind edge_kind_from_string(std::string_view kind);
+Status status_from_string(std::string_view status);
+MemoryType memory_type_from_string(std::string_view type);
 
 struct Node {
     NodeKind kind;
@@ -73,13 +152,14 @@ constexpr SourceSpan unpack_source_span(PackedSourceSpan packed) {
 struct SymbolData {
     FileId file;
     SymbolKind sym_kind;
+    StringId name;
     StringId qualified_name;
     StringId signature;
     SourceSpan span;
 };
 
 struct MemoryData {
-    uint8_t memory_type;
+    MemoryType memory_type;
     int64_t body_rowid;
 };
 

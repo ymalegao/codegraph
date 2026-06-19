@@ -40,5 +40,6 @@ void bind_text(sqlite3_stmt* stmt, int index, std::string_view value);
 void bind_int64(sqlite3_stmt* stmt, int index, int64_t value);
 void bind_blob(sqlite3_stmt* stmt, int index, const std::vector<uint8_t>& bytes);
 std::string column_text(sqlite3_stmt* stmt, int column);
+uint32_t checked_u32(int64_t value, std::string_view field);
 
 }  // namespace codegraph

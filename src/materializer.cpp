@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
+#include "core.h"
 #include "file_util.h"
 #include "hash_util.h"
 #include "resolver.h"
@@ -207,14 +208,15 @@ int64_t upsert_memory_node(
     Statement upsert(
         storage.handle(),
         "INSERT INTO nodes(stable_id, kind, title, created_at, status) "
-        "VALUES (?, ?, ?, ?, 'active') "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(stable_id) DO UPDATE SET "
-        "kind = excluded.kind, title = excluded.title, status = 'active';"
+        "kind = excluded.kind, title = excluded.title, status = excluded.status;"
     );
     bind_text(upsert.get(), 1, stable_id);
     bind_text(upsert.get(), 2, kind);
     bind_text(upsert.get(), 3, title);
     bind_text(upsert.get(), 4, created_at);
+    bind_text(upsert.get(), 5, status_text(Status::Active));
     upsert.expect_done("upsert memory node");
 
     Statement select(storage.handle(), "SELECT node_id FROM nodes WHERE stable_id = ?;");
@@ -272,7 +274,7 @@ void insert_affects_edge(
     Statement stmt(
         storage.handle(),
         "INSERT INTO edges(from_node, to_node, to_ref, kind, resolved) "
-        "VALUES (?, ?, ?, 'affects', ?);"
+        "VALUES (?, ?, ?, ?, ?);"
     );
     bind_int64(stmt.get(), 1, memory_node);
     if (target >= 0) {
@@ -285,7 +287,8 @@ void insert_affects_edge(
         );
     }
     bind_text(stmt.get(), 3, to_ref);
-    bind_int64(stmt.get(), 4, target >= 0 ? 1 : 0);
+    bind_text(stmt.get(), 4, edge_kind_text(EdgeKind::Affects));
+    bind_int64(stmt.get(), 5, target >= 0 ? 1 : 0);
     stmt.expect_done("insert affects edge");
 }
 
@@ -313,11 +316,11 @@ void apply_correction(Storage& storage, const Operation& op) {
     const int64_t node_id = upsert_memory_node(
         storage,
         memory_stable_id(op),
-        "correction",
+        node_kind_text(NodeKind::Correction),
         title,
         op.created_at
     );
-    insert_memory(storage, node_id, "correction", title, reason, op.created_at);
+    insert_memory(storage, node_id, memory_type_text(MemoryType::Correction), title, reason, op.created_at);
 
     for (const std::string& pattern : json_string_array(op.payload, "prefer_paths")) {
         insert_path_rule(storage, node_id, "prefer", pattern, reason);
@@ -336,11 +339,11 @@ void apply_decision(Storage& storage, const Operation& op) {
     const int64_t node_id = upsert_memory_node(
         storage,
         memory_stable_id(op),
-        "arch_decision",
+        node_kind_text(NodeKind::ArchDecision),
         title,
         op.created_at
     );
-    insert_memory(storage, node_id, "arch_decision", title, body, op.created_at);
+    insert_memory(storage, node_id, memory_type_text(MemoryType::ArchDecision), title, body, op.created_at);
 
     for (const std::string& ref : json_string_array(op.payload, "affects")) {
         insert_affects_edge(storage, node_id, ref);

@@ -1,7 +1,6 @@
 #include "graph_store.h"
 
 #include <algorithm>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -11,6 +10,7 @@
 #include <sqlite3.h>
 
 #include "hash_util.h"
+#include "source_projection.h"
 #include "sqlite_util.h"
 
 namespace codegraph {
@@ -21,59 +21,6 @@ struct EdgeRow {
     uint32_t to = 0;
     EdgeKind kind = EdgeKind::Contains;
 };
-
-NodeKind parse_node_kind(std::string_view kind) {
-    if (kind == "file") return NodeKind::File;
-    if (kind == "symbol") return NodeKind::Symbol;
-    if (kind == "correction") return NodeKind::Correction;
-    if (kind == "arch_decision") return NodeKind::ArchDecision;
-    throw std::runtime_error("unknown node kind: " + std::string(kind));
-}
-
-Status parse_status(std::string_view status) {
-    if (status == "active") return Status::Active;
-    if (status == "tombstoned") return Status::Tombstoned;
-    if (status == "stale") return Status::Stale;
-    return Status::Active;
-}
-
-SymbolKind parse_symbol_kind(std::string_view kind) {
-    if (kind == "function") return SymbolKind::Function;
-    if (kind == "method") return SymbolKind::Method;
-    if (kind == "class") return SymbolKind::Class;
-    if (kind == "struct") return SymbolKind::Struct;
-    if (kind == "namespace") return SymbolKind::Namespace;
-    if (kind == "enum") return SymbolKind::Enum;
-    if (kind == "field") return SymbolKind::Field;
-    return SymbolKind::Other;
-}
-
-EdgeKind parse_edge_kind(std::string_view kind) {
-    if (kind == "contains") return EdgeKind::Contains;
-    if (kind == "imports") return EdgeKind::Imports;
-    if (kind == "affects") return EdgeKind::Affects;
-    throw std::runtime_error("unknown edge kind: " + std::string(kind));
-}
-
-uint8_t parse_memory_type(std::string_view type) {
-    if (type == "correction") return 0;
-    if (type == "arch_decision") return 1;
-    return 255;
-}
-
-uint32_t checked_node_index(int64_t value) {
-    if (value < 0 || value > std::numeric_limits<uint32_t>::max()) {
-        throw std::runtime_error("node_id is outside uint32_t range");
-    }
-    return static_cast<uint32_t>(value);
-}
-
-uint32_t checked_file_id(int64_t value) {
-    if (value < 0 || value > std::numeric_limits<uint32_t>::max()) {
-        throw std::runtime_error("file_id is outside uint32_t range");
-    }
-    return static_cast<uint32_t>(value);
-}
 
 uint64_t parse_hex_u64(std::string_view text) {
     uint64_t value = 0;
@@ -90,6 +37,11 @@ uint64_t parse_hex_u64(std::string_view text) {
         }
     }
     return value;
+}
+
+bool active_memory_node(const Node& node) {
+    return node.status == Status::Active &&
+           (node.kind == NodeKind::Correction || node.kind == NodeKind::ArchDecision);
 }
 
 Csr build_csr(uint32_t node_count, const std::vector<EdgeRow>& edges, bool reverse) {
@@ -141,27 +93,39 @@ void sort_unique_nodes(std::vector<NodeId>& nodes) {
 
 GraphIndex build_graph_index(Storage& storage) {
     GraphIndex index;
-    const uint32_t max_node_id = checked_node_index(
-        storage.query_int("SELECT COALESCE(MAX(node_id), 0) FROM nodes;")
+    const uint32_t max_node_id = checked_u32(
+        storage.query_int("SELECT COALESCE(MAX(node_id), 0) FROM nodes;"),
+        "node_id"
     );
     index.graph.nodes.assign(
         static_cast<size_t>(max_node_id) + 1U,
         Node{NodeKind::File, Status::Tombstoned, 0, index.interner.intern(""), 0}
     );
 
+    std::unordered_map<std::string, std::vector<uint32_t>> symbol_nodes_by_suffix;
     Statement nodes_stmt(
         storage.handle(),
-        "SELECT node_id, kind, title, status FROM nodes ORDER BY node_id;"
+        "SELECT node_id, stable_id, kind, title, status FROM nodes ORDER BY node_id;"
     );
     while (nodes_stmt.step()) {
-        const uint32_t node_id = checked_node_index(sqlite3_column_int64(nodes_stmt.get(), 0));
+        const uint32_t node_id = checked_u32(sqlite3_column_int64(nodes_stmt.get(), 0), "node_id");
+        const NodeKind kind = node_kind_from_string(column_text(nodes_stmt.get(), 2));
         index.graph.nodes[node_id] = Node{
-            parse_node_kind(column_text(nodes_stmt.get(), 1)),
-            parse_status(column_text(nodes_stmt.get(), 3)),
+            kind,
+            status_from_string(column_text(nodes_stmt.get(), 4)),
             0,
-            index.interner.intern(column_text(nodes_stmt.get(), 2)),
+            index.interner.intern(column_text(nodes_stmt.get(), 3)),
             0,
         };
+
+        if (kind == NodeKind::Symbol) {
+            SymbolStableIdParts parts;
+            if (parse_symbol_stable_id(column_text(nodes_stmt.get(), 1), parts)) {
+                symbol_nodes_by_suffix[
+                    symbol_stable_suffix(parts.path, parts.qualified_name)
+                ].push_back(node_id);
+            }
+        }
     }
 
     Statement file_stmt(
@@ -169,31 +133,13 @@ GraphIndex build_graph_index(Storage& storage) {
         "SELECT file_id, path FROM files ORDER BY path;"
     );
     while (file_stmt.step()) {
-        const auto file_id = static_cast<FileId>(checked_file_id(sqlite3_column_int64(file_stmt.get(), 0)));
+        const auto file_id = static_cast<FileId>(
+            checked_u32(sqlite3_column_int64(file_stmt.get(), 0), "file_id")
+        );
         const StringId path = index.interner.intern(column_text(file_stmt.get(), 1));
         index.file_by_path.push_back({path, file_id});
     }
     std::sort(index.file_by_path.begin(), index.file_by_path.end());
-
-    std::unordered_map<std::string, std::vector<uint32_t>> symbol_nodes_by_suffix;
-    Statement symbol_node_stmt(
-        storage.handle(),
-        "SELECT node_id, stable_id FROM nodes WHERE kind = 'symbol';"
-    );
-    while (symbol_node_stmt.step()) {
-        const std::string stable_id = column_text(symbol_node_stmt.get(), 1);
-        static constexpr std::string_view kPrefix = "symbol:";
-        if (stable_id.rfind(kPrefix, 0) != 0) {
-            continue;
-        }
-        const size_t repo_end = stable_id.find(':', kPrefix.size());
-        if (repo_end == std::string::npos) {
-            continue;
-        }
-        symbol_nodes_by_suffix[stable_id.substr(repo_end)].push_back(
-            checked_node_index(sqlite3_column_int64(symbol_node_stmt.get(), 0))
-        );
-    }
 
     Statement symbol_stmt(
         storage.handle(),
@@ -204,8 +150,9 @@ GraphIndex build_graph_index(Storage& storage) {
     );
     while (symbol_stmt.step()) {
         const std::string path = column_text(symbol_stmt.get(), 1);
+        const std::string name = column_text(symbol_stmt.get(), 3);
         const std::string qualified_name = column_text(symbol_stmt.get(), 4);
-        const std::string suffix = ":" + path + "::" + qualified_name;
+        const std::string suffix = symbol_stable_suffix(path, qualified_name);
         const auto node_it = symbol_nodes_by_suffix.find(suffix);
         if (node_it == symbol_nodes_by_suffix.end() || node_it->second.empty()) {
             continue;
@@ -215,22 +162,23 @@ GraphIndex build_graph_index(Storage& storage) {
         const uint32_t payload = static_cast<uint32_t>(index.graph.symbols.size());
         index.graph.nodes[node_id].payload = payload;
         index.graph.symbols.push_back(SymbolData{
-            static_cast<FileId>(checked_file_id(sqlite3_column_int64(symbol_stmt.get(), 0))),
-            parse_symbol_kind(column_text(symbol_stmt.get(), 2)),
+            static_cast<FileId>(checked_u32(sqlite3_column_int64(symbol_stmt.get(), 0), "file_id")),
+            symbol_kind_from_string(column_text(symbol_stmt.get(), 2)),
+            index.interner.intern(name),
             index.interner.intern(qualified_name),
             index.interner.intern(column_text(symbol_stmt.get(), 5)),
             SourceSpan{
-                static_cast<uint32_t>(sqlite3_column_int64(symbol_stmt.get(), 6)),
-                static_cast<uint32_t>(sqlite3_column_int64(symbol_stmt.get(), 7)),
-                static_cast<uint32_t>(sqlite3_column_int64(symbol_stmt.get(), 8)),
-                static_cast<uint32_t>(sqlite3_column_int64(symbol_stmt.get(), 9)),
+                checked_u32(sqlite3_column_int64(symbol_stmt.get(), 6), "start_line"),
+                checked_u32(sqlite3_column_int64(symbol_stmt.get(), 7), "end_line"),
+                checked_u32(sqlite3_column_int64(symbol_stmt.get(), 8), "start_byte"),
+                checked_u32(sqlite3_column_int64(symbol_stmt.get(), 9), "end_byte"),
                 parse_hex_u64(column_text(symbol_stmt.get(), 10)),
                 0,
             },
         });
 
         index.symbol_by_namehash.push_back({
-            xxh64_u64(column_text(symbol_stmt.get(), 3)),
+            xxh64_u64(name),
             static_cast<NodeId>(node_id),
         });
         index.symbol_by_namehash.push_back({
@@ -246,14 +194,14 @@ GraphIndex build_graph_index(Storage& storage) {
         "FROM memories m ORDER BY m.node_id;"
     );
     while (memo_stmt.step()) {
-        const uint32_t node_id = checked_node_index(sqlite3_column_int64(memo_stmt.get(), 0));
+        const uint32_t node_id = checked_u32(sqlite3_column_int64(memo_stmt.get(), 0), "node_id");
         if (node_id >= index.graph.nodes.size()) {
             continue;
         }
         const uint32_t payload = static_cast<uint32_t>(index.graph.memos.size());
         index.graph.nodes[node_id].payload = payload;
         index.graph.memos.push_back(MemoryData{
-            parse_memory_type(column_text(memo_stmt.get(), 1)),
+            memory_type_from_string(column_text(memo_stmt.get(), 1)),
             sqlite3_column_int64(memo_stmt.get(), 2),
         });
     }
@@ -265,9 +213,9 @@ GraphIndex build_graph_index(Storage& storage) {
     );
     while (edge_stmt.step()) {
         edges.push_back(EdgeRow{
-            checked_node_index(sqlite3_column_int64(edge_stmt.get(), 0)),
-            checked_node_index(sqlite3_column_int64(edge_stmt.get(), 1)),
-            parse_edge_kind(column_text(edge_stmt.get(), 2)),
+            checked_u32(sqlite3_column_int64(edge_stmt.get(), 0), "from_node"),
+            checked_u32(sqlite3_column_int64(edge_stmt.get(), 1), "to_node"),
+            edge_kind_from_string(column_text(edge_stmt.get(), 2)),
         });
     }
 
@@ -303,7 +251,7 @@ std::vector<NodeId> graph_memory_for_node(
     for (NodeId candidate : csr_neighbors(index.graph.reverse, node, EdgeKind::Affects)) {
         if (to_u32(candidate) < index.graph.nodes.size()) {
             const Node& memory = index.graph.nodes[to_u32(candidate)];
-            if (memory.kind == NodeKind::Correction || memory.kind == NodeKind::ArchDecision) {
+            if (active_memory_node(memory)) {
                 memories.push_back(candidate);
             }
         }
@@ -331,7 +279,7 @@ uint32_t graph_memory_count_for_node(
         const NodeId candidate = index.graph.reverse.neighbors[i];
         if (to_u32(candidate) < index.graph.nodes.size()) {
             const Node& memory = index.graph.nodes[to_u32(candidate)];
-            if (memory.kind == NodeKind::Correction || memory.kind == NodeKind::ArchDecision) {
+            if (active_memory_node(memory)) {
                 ++count;
             }
         }
@@ -363,7 +311,20 @@ std::vector<NodeId> graph_symbols_by_name_hash(
 
     std::vector<NodeId> result;
     for (auto it = begin; it != end; ++it) {
-        result.push_back(it->second);
+        const uint32_t node_index = to_u32(it->second);
+        if (node_index >= index.graph.nodes.size()) {
+            continue;
+        }
+        const Node& node = index.graph.nodes[node_index];
+        if (node.kind != NodeKind::Symbol || node.status != Status::Active ||
+            node.payload >= index.graph.symbols.size()) {
+            continue;
+        }
+        const SymbolData& symbol = index.graph.symbols[node.payload];
+        if (index.interner.view(symbol.name) == name ||
+            index.interner.view(symbol.qualified_name) == name) {
+            result.push_back(it->second);
+        }
     }
     sort_unique_nodes(result);
     return result;

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,7 @@
 #include "read_tools.h"
 #include "resolver.h"
 #include "scanner.h"
+#include "source_projection.h"
 #include "sqlite_util.h"
 #include "storage.h"
 
@@ -480,9 +482,44 @@ int command_test_core() {
     require(unpacked.content_hash == span.content_hash, "span content_hash round-trip mismatch");
     require(unpacked.flags == span.flags, "span flags round-trip mismatch");
 
+    require(codegraph::node_kind_text(codegraph::NodeKind::Symbol) == "symbol", "node kind text mismatch");
+    require(
+        codegraph::node_kind_from_string("arch_decision") == codegraph::NodeKind::ArchDecision,
+        "node kind parse mismatch"
+    );
+    require(
+        codegraph::symbol_kind_text(codegraph::SymbolKind::Field) == "field",
+        "symbol kind text mismatch"
+    );
+    require(
+        codegraph::symbol_kind_from_string("method") == codegraph::SymbolKind::Method,
+        "symbol kind parse mismatch"
+    );
+    require(
+        codegraph::edge_kind_from_string("affects") == codegraph::EdgeKind::Affects,
+        "edge kind parse mismatch"
+    );
+    require(
+        codegraph::memory_type_from_string("correction") == codegraph::MemoryType::Correction,
+        "memory type parse mismatch"
+    );
+    codegraph::SymbolStableIdParts parsed;
+    require(
+        codegraph::parse_symbol_stable_id(
+            codegraph::symbol_stable_id("repo", "src/x.cc", "ns::thing"),
+            parsed
+        ),
+        "symbol stable id did not parse"
+    );
+    require(parsed.repo_id == "repo", "symbol stable repo parse mismatch");
+    require(parsed.path == "src/x.cc", "symbol stable path parse mismatch");
+    require(parsed.qualified_name == "ns::thing", "symbol stable qualified parse mismatch");
+
     std::cout << "core types: ok\n";
     std::cout << "string interner: ok\n";
     std::cout << "source span pack/unpack: ok\n";
+    std::cout << "kind vocabulary: ok\n";
+    std::cout << "stable ids: ok\n";
     return 0;
 }
 
@@ -626,6 +663,47 @@ int command_find_symbol(const std::string& query) {
                   << "\t" << match.kind
                   << "\t" << match.path << ":" << match.start_line << "-" << match.end_line
                   << "\t" << "symbol_id=" << match.symbol_id
+                  << "\n";
+    }
+    return 0;
+}
+
+int command_search_symbol(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        throw std::runtime_error("usage: codegraph search-symbol <query> [--kind K] [--limit N]");
+    }
+
+    std::string kind;
+    uint32_t limit = 20;
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "--kind" && i + 1U < args.size()) {
+            kind = args[++i];
+            continue;
+        }
+        if (args[i] == "--limit" && i + 1U < args.size()) {
+            limit = static_cast<uint32_t>(std::stoul(args[++i]));
+            continue;
+        }
+        throw std::runtime_error("usage: codegraph search-symbol <query> [--kind K] [--limit N]");
+    }
+
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    const std::vector<codegraph::SymbolSearchMatch> matches =
+        kind.empty()
+            ? codegraph::search_symbols(storage, args[0], std::nullopt, limit)
+            : codegraph::search_symbols(storage, args[0], std::string_view(kind), limit);
+    for (const codegraph::SymbolSearchMatch& match : matches) {
+        std::cout << match.qualified_name
+                  << "\t" << match.kind
+                  << "\t" << match.path << ":" << match.start_line << "-" << match.end_line
+                  << "\t" << "symbol_id=" << match.symbol_id
+                  << "\t" << "score=" << match.score
+                  << "\t" << "signature=" << match.signature
                   << "\n";
     }
     return 0;
@@ -804,10 +882,14 @@ uint32_t sql_direct_memory_count(codegraph::Storage& storage, int64_t target_nod
     codegraph::Statement stmt(
         storage.handle(),
         "SELECT COUNT(DISTINCT m.memory_id) "
-        "FROM edges e JOIN memories m ON m.node_id = e.from_node "
-        "WHERE e.kind = 'affects' AND e.resolved = 1 AND e.to_node = ?;"
+        "FROM edges e "
+        "JOIN memories m ON m.node_id = e.from_node "
+        "JOIN nodes n ON n.node_id = m.node_id "
+        "WHERE e.kind = ? AND e.resolved = 1 AND e.to_node = ? AND n.status = ?;"
     );
-    codegraph::bind_int64(stmt.get(), 1, target_node);
+    codegraph::bind_text(stmt.get(), 1, codegraph::edge_kind_text(codegraph::EdgeKind::Affects));
+    codegraph::bind_int64(stmt.get(), 2, target_node);
+    codegraph::bind_text(stmt.get(), 3, codegraph::status_text(codegraph::Status::Active));
     stmt.expect_row("count direct memory edges");
     return static_cast<uint32_t>(sqlite3_column_int64(stmt.get(), 0));
 }
@@ -1178,6 +1260,14 @@ int command_test_read() {
         "int stay() {\n"
         "    return 0;\n"
         "}\n"
+        "\n"
+        "int authCheck() {\n"
+        "    return 1;\n"
+        "}\n"
+        "\n"
+        "int signatureCarrier(int authCheck) {\n"
+        "    return authCheck;\n"
+        "}\n"
         "}\n"
     );
 
@@ -1190,6 +1280,20 @@ int command_test_read() {
         const std::vector<codegraph::SymbolMatch> found =
             codegraph::find_symbols(storage, "readstep::target");
         require(found.size() == 1U, "find-symbol did not find readstep::target");
+
+        const std::vector<codegraph::SymbolSearchMatch> search_found =
+            codegraph::search_symbols(storage, "authCheck:* -(", codegraph::KindText::Function, 10);
+        require(search_found.size() >= 2U, "search-symbol did not return ranked FTS candidates");
+        require(
+            search_found.front().qualified_name == "readstep::authCheck",
+            "search-symbol did not rank name hit before signature hit"
+        );
+        require(search_found.front().signature == "authCheck()", "search-symbol did not return signature");
+        require(search_found.front().path == "testing/codegraph_read_tmp.cpp", "search-symbol path mismatch");
+        require(search_found.front().start_line > 0U, "search-symbol did not return location");
+        const std::vector<codegraph::SymbolSearchMatch> limited_search =
+            codegraph::search_symbols(storage, "readstep::authCheck", codegraph::KindText::Function, 1);
+        require(limited_search.size() == 1U, "search-symbol limit was not applied");
 
         const codegraph::ReadSymbolResult initial = codegraph::read_symbol_verified(
             storage,
@@ -1257,6 +1361,7 @@ int command_test_read() {
     std::filesystem::remove(db_path, ignored);
 
     std::cout << "find symbol: ok\n";
+    std::cout << "search symbol: ok\n";
     std::cout << "read symbol: ok\n";
     std::cout << "read file range: ok\n";
     std::cout << "verify before trust: ok\n";
@@ -1529,6 +1634,11 @@ int command_test_graph() {
             codegraph::materialize(storage, codegraph_dir);
         require(materialized.ops_applied == kMemoryCount,
                 "graph test did not materialize expected memories");
+        storage.execute(
+            "UPDATE nodes SET status = 'tombstoned' "
+            "WHERE node_id = (SELECT node_id FROM memories ORDER BY memory_id LIMIT 1);"
+        );
+        constexpr uint32_t kActiveMemoryCount = kMemoryCount - 1U;
 
         const int64_t target_node = codegraph::resolve_reference(storage, target_ref);
         require(target_node >= 0, "graph test target did not resolve");
@@ -1551,7 +1661,7 @@ int command_test_graph() {
         }
         const auto csr_end = std::chrono::steady_clock::now();
 
-        require(sql_total == kMemoryCount * kRepetitions,
+        require(sql_total == kActiveMemoryCount * kRepetitions,
                 "SQL memory count did not match expected count");
         require(csr_total == sql_total,
                 "CSR memory count did not match SQL memory count");
@@ -1639,6 +1749,7 @@ void print_usage() {
         << "  codegraph scan\n"
         << "  codegraph index\n"
         << "  codegraph find-symbol <name>\n"
+        << "  codegraph search-symbol <query> [--kind K] [--limit N]\n"
         << "  codegraph read-symbol <name>\n"
         << "  codegraph read-file <path> --start N --end M\n"
         << "  codegraph remember --title T --body B --affects P [--affects P2 ...]\n"
@@ -1680,6 +1791,14 @@ int main(int argc, char** argv) {
 
         if (argc == 3 && std::strcmp(argv[1], "find-symbol") == 0) {
             return command_find_symbol(argv[2]);
+        }
+
+        if (argc >= 3 && std::strcmp(argv[1], "search-symbol") == 0) {
+            std::vector<std::string> args;
+            for (int i = 2; i < argc; ++i) {
+                args.emplace_back(argv[i]);
+            }
+            return command_search_symbol(args);
         }
 
         if (argc == 3 && std::strcmp(argv[1], "read-symbol") == 0) {

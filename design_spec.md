@@ -455,7 +455,12 @@ Protocol messages on **stdout only**; all logging to stderr / `.codegraph/logs/m
 
 ```
 find_symbol(name, kind?)
-    -> [ { qualified_name, file, start_line, end_line, symbol_id } ]   # ranked, top few
+    -> [ { qualified_name, file, start_line, end_line, symbol_id } ]   # exact, top few
+
+search_symbol(query, kind?, limit=20)
+    -> [ { symbol_id, qualified_name, file, start_line, end_line, kind, signature, score } ]
+    # SQLite FTS5/BM25 discovery over fts_symbols; sanitize raw query into quoted terms.
+    # No body; callers choose a candidate and then call read_symbol.
 
 read_symbol(name | symbol_id, body=true, include_memory=true)
     -> { qualified_name, file, start_line, end_line, hash_status, body?,
@@ -501,7 +506,7 @@ codegraph bench lookup|memory-for|read           # latency measurement
 codegraph mcp                                    # launch the MCP stdio server
 ```
 
-The CLI is the human surface (setup, authoring memory, maintenance, inspection). The query/read tools listed in §10 are the agent-facing MCP surface; the CLI versions (`find-symbol`, `read-symbol`, `read-file`, `memory-for`) exist for local inspection and testing only.
+The CLI is the human surface (setup, authoring memory, maintenance, inspection). The query/read tools listed in §10 are the agent-facing MCP surface; the CLI versions (`find-symbol`, `search-symbol`, `read-symbol`, `read-file`, `memory-for`) exist for local inspection and testing only.
 
 ---
 

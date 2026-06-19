@@ -4,16 +4,50 @@
 
 namespace codegraph {
 
+namespace {
+inline constexpr std::string_view kFileStablePrefix = "file:";
+inline constexpr std::string_view kSymbolStablePrefix = "symbol:";
+}  // namespace
+
 std::string file_stable_id(std::string_view repo_id, std::string_view path) {
-    return "file:" + std::string(repo_id) + ":" + std::string(path);
+    return std::string(kFileStablePrefix) + std::string(repo_id) + ":" + std::string(path);
 }
 
 std::string symbol_stable_id(std::string_view repo_id, std::string_view path, std::string_view qualified_name) {
-    return "symbol:" + std::string(repo_id) + ":" + std::string(path) + "::" + std::string(qualified_name);
+    return std::string(kSymbolStablePrefix) + std::string(repo_id) +
+           symbol_stable_suffix(path, qualified_name);
 }
 
 std::string symbol_stable_prefix(std::string_view repo_id, std::string_view path) {
-    return "symbol:" + std::string(repo_id) + ":" + std::string(path) + "::%";
+    return std::string(kSymbolStablePrefix) + std::string(repo_id) +
+           symbol_stable_suffix(path, "") + "%";
+}
+
+std::string symbol_stable_suffix(std::string_view path, std::string_view qualified_name) {
+    return ":" + std::string(path) + "::" + std::string(qualified_name);
+}
+
+bool parse_symbol_stable_id(std::string_view stable_id, SymbolStableIdParts& parts) {
+    if (stable_id.rfind(kSymbolStablePrefix, 0) != 0) {
+        return false;
+    }
+
+    const size_t repo_start = kSymbolStablePrefix.size();
+    const size_t repo_end = stable_id.find(':', repo_start);
+    if (repo_end == std::string_view::npos) {
+        return false;
+    }
+
+    const size_t path_start = repo_end + 1U;
+    const size_t path_end = stable_id.find("::", path_start);
+    if (path_end == std::string_view::npos) {
+        return false;
+    }
+
+    parts.repo_id = std::string(stable_id.substr(repo_start, repo_end - repo_start));
+    parts.path = std::string(stable_id.substr(path_start, path_end - path_start));
+    parts.qualified_name = std::string(stable_id.substr(path_end + 2U));
+    return !parts.repo_id.empty() && !parts.path.empty() && !parts.qualified_name.empty();
 }
 
 void delete_source_file_projection(

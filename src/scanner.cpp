@@ -7,6 +7,7 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "core.h"
 #include "file_util.h"
 #include "hash_util.h"
 #include "resolver.h"
@@ -238,9 +239,9 @@ ScanResult scan_repository(
     Statement upsert_file_node(
         storage.handle(),
         "INSERT INTO nodes(stable_id, kind, title, created_at, status) "
-        "VALUES (?, 'file', ?, ?, 'active') "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(stable_id) DO UPDATE SET "
-        "kind = 'file', title = excluded.title, status = 'active';"
+        "kind = excluded.kind, title = excluded.title, status = excluded.status;"
     );
     Statement upsert_line_table(
         storage.handle(),
@@ -285,8 +286,10 @@ ScanResult scan_repository(
 
             upsert_file_node.reset();
             bind_text(upsert_file_node.get(), 1, file_stable_id(options.repo_id, rel));
-            bind_text(upsert_file_node.get(), 2, rel);
-            bind_text(upsert_file_node.get(), 3, current_utc_timestamp());
+            bind_text(upsert_file_node.get(), 2, node_kind_text(NodeKind::File));
+            bind_text(upsert_file_node.get(), 3, rel);
+            bind_text(upsert_file_node.get(), 4, current_utc_timestamp());
+            bind_text(upsert_file_node.get(), 5, status_text(Status::Active));
             upsert_file_node.expect_done("upsert file node");
 
             const std::string bytes = read_file_bytes(it->path());

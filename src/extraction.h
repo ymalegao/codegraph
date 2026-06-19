@@ -4,17 +4,19 @@
 #include <string>
 #include <vector>
 
+#include "core.h"
+
 namespace codegraph {
 
 namespace SymbolKinds {
-inline constexpr const char* Function = "function";
-inline constexpr const char* Method = "method";
-inline constexpr const char* Class = "class";
-inline constexpr const char* Struct = "struct";
-inline constexpr const char* Namespace = "namespace";
-inline constexpr const char* Enum = "enum";
-inline constexpr const char* Field = "field";
-inline constexpr const char* Other = "other";
+inline constexpr const char* Function = KindText::Function.data();
+inline constexpr const char* Method = KindText::Method.data();
+inline constexpr const char* Class = KindText::Class.data();
+inline constexpr const char* Struct = KindText::Struct.data();
+inline constexpr const char* Namespace = KindText::Namespace.data();
+inline constexpr const char* Enum = KindText::Enum.data();
+inline constexpr const char* Field = KindText::Field.data();
+inline constexpr const char* Other = KindText::Other.data();
 }  // namespace SymbolKinds
 
 struct SymbolInfo {
