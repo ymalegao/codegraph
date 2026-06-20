@@ -93,15 +93,27 @@ bool contains_component(std::string_view path, std::string_view component) {
     return path.size() >= suffix.size() && path.substr(path.size() - suffix.size()) == suffix;
 }
 
-bool ignored_relative_path(std::string_view path) {
-    // Tier 0 hard-codes the spec defaults; config.yaml loading comes in a later milestone.
-    return first_component_is(path, ".git") ||
-           first_component_is(path, "build") ||
-           first_component_is(path, "node_modules") ||
-           first_component_is(path, "third_party") ||
-           first_component_is(path, "generated") ||
-           first_component_starts_with(path, "cmake-build-") ||
-           contains_component(path, "__pycache__");
+bool matches_ignore_pattern(std::string_view path, std::string_view pattern) {
+    if (pattern == ".git/**") return first_component_is(path, ".git");
+    if (pattern == "build/**") return first_component_is(path, "build");
+    if (pattern == "node_modules/**") return first_component_is(path, "node_modules");
+    if (pattern == "third_party/**") return first_component_is(path, "third_party");
+    if (pattern == "generated/**") return first_component_is(path, "generated");
+    if (pattern == "cmake-build-*/**") return first_component_starts_with(path, "cmake-build-");
+    if (pattern == "**/__pycache__/**") return contains_component(path, "__pycache__");
+    if (pattern.size() > 3U && pattern.substr(pattern.size() - 3U) == "/**") {
+        return first_component_is(path, pattern.substr(0, pattern.size() - 3U));
+    }
+    return path == pattern;
+}
+
+bool ignored_relative_path(std::string_view path, const std::vector<std::string>& patterns) {
+    for (const std::string& pattern : patterns) {
+        if (matches_ignore_pattern(path, pattern)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void write_le32(std::vector<uint8_t>& bytes, uint32_t value) {
@@ -211,9 +223,26 @@ ScanResult scan_repository(
     const ScanOptions& options
 ) {
     const std::filesystem::path repo_root = std::filesystem::weakly_canonical(options.repo_root);
+    const std::vector<std::string> ignore_patterns =
+        options.ignore_patterns.empty()
+            ? std::vector<std::string>{
+                  ".git/**",
+                  "build/**",
+                  "cmake-build-*/**",
+                  "node_modules/**",
+                  "**/__pycache__/**",
+                  "third_party/**",
+                  "generated/**",
+              }
+            : options.ignore_patterns;
     ScanResult result;
-    result.branch = git_output(repo_root, "rev-parse --abbrev-ref HEAD");
-    result.commit_hash = git_output(repo_root, "rev-parse HEAD");
+    try {
+        result.branch = git_output(repo_root, "rev-parse --abbrev-ref HEAD");
+        result.commit_hash = git_output(repo_root, "rev-parse HEAD");
+    } catch (const std::exception&) {
+        result.branch.clear();
+        result.commit_hash.clear();
+    }
     std::unordered_set<std::string> seen_paths;
 
     Statement select_file(
@@ -260,7 +289,7 @@ ScanResult scan_repository(
             const std::filesystem::path rel_path = std::filesystem::relative(it->path(), repo_root);
             const std::string rel = rel_path.generic_string();
 
-            if (ignored_relative_path(rel)) {
+            if (ignored_relative_path(rel, ignore_patterns)) {
                 if (it->is_directory()) {
                     it.disable_recursion_pending();
                 }

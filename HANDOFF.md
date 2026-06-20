@@ -446,8 +446,115 @@ Added:
 Step 9 intentionally does not add:
 
 - HTTP transport
-- incremental graph rebuilds
 - MCP resources/prompts
+
+### Step 10: launch-anywhere + hooks + auto-freshness
+
+Implemented in:
+
+- `src/bootstrap.h`
+- `src/bootstrap.cpp`
+- `src/scanner.h`
+- `src/scanner.cpp`
+- `src/indexer.h`
+- `src/indexer.cpp`
+- `src/mcp_server.cpp`
+- `src/main.cpp`
+- `.claude/settings.json`
+- `CLAUDE.md`
+- `CMakeLists.txt`
+
+Added:
+
+- CLI command: `./build/codegraph init [path]`
+  - Creates `.codegraph/`, `.codegraph/ops/`, and `.codegraph/logs/`.
+  - Creates `.codegraph/device_id`.
+  - Writes `.codegraph/config.yaml` if missing.
+  - Initializes SQLite schema.
+  - Runs scan, index, and materialize.
+  - Is idempotent.
+- Config loading:
+  - `repo_id`
+  - `ignore`
+  - `max_file_size_mb`
+- `scan` and `index` accept optional `[path]`.
+- `scan_repository` uses config-provided ignore patterns and keeps the prior defaults when none are supplied.
+- `scan_repository` captures Git branch/commit best-effort; non-Git directories still index.
+- `index` now runs materialize after indexing so pending memory edges resolve without a manual materialize step.
+- Incremental `index_repository` skip:
+  - skips files whose symbol projection already matches the current file content hash
+  - reparses changed files and files without a current projection
+- `codegraph mcp [path]`
+  - accepts optional repo path
+  - self-bootstraps when `.codegraph` is missing or the DB has zero files
+  - builds the graph after bootstrap
+- MCP auto-freshness:
+  - tracks SQLite `PRAGMA data_version`
+  - rebuilds the in-memory graph before read tools when another process committed changes
+  - keeps explicit graph rebuilds after `record_*` writes
+- Claude Code project hooks in `.claude/settings.json`:
+  - `SessionStart`: `init`
+  - `UserPromptSubmit`: `index`
+  - `PostToolUse` for `Edit|Write|MultiEdit`: `index`
+  - hook output goes to `.codegraph/logs/hook.log`
+- `CLAUDE.md` policy:
+  - use CodeGraph MCP reads before raw reads
+  - discovery-to-retrieval workflow
+  - memory checks before edits
+  - durable memory guidance
+  - do not manually run scan/index/materialize
+- `AGENTS.md` policy for Codex:
+  - mirrors the CodeGraph MCP usage guidance for Codex agents
+  - prefers exact CodeGraph reads before raw file reads
+  - documents discovery-to-retrieval and durable memory rules
+- MCP fixes:
+  - ReResolved symbol kind uses shared kind vocabulary
+  - `read_file_range` rejects zero line defaults consistently
+- Manual validation:
+  - `codegraph init` works in a standalone non-Git temp directory.
+  - a long-lived `codegraph mcp` process sees a separate `codegraph index` process through `PRAGMA data_version`.
+
+Step 10 intentionally does not add:
+
+- background file watcher
+- sync commands
+- incremental graph patching
+- new language frontends
+
+### Step 11: doctor + bench + acceptance tests
+
+Implemented in:
+
+- `src/main.cpp`
+- `HANDOFF.md`
+- `design_spec.md`
+
+Added:
+
+- CLI command: `./build/codegraph doctor [path]`
+  - Checks schema version.
+  - Checks file/line-table consistency.
+  - Checks symbols reference existing files.
+  - Checks node kind/status vocabulary.
+  - Checks edge endpoints.
+  - Checks memories/path rules reference existing nodes.
+  - Checks FTS row-count drift for symbols and memories.
+  - Returns nonzero if any integrity check fails.
+- CLI command: `./build/codegraph bench index [repetitions]`
+  - Runs the actual scan+index incremental path.
+  - Reports changed and unchanged file counts plus elapsed time.
+- Manual smoke command: `./build/codegraph test-acceptance`
+  - Runs the §13 acceptance suite.
+  - Reuses the existing scan/index/read/memory/materialize tests.
+  - Adds the missing two-op-stream materialization check.
+  - Runs `doctor` on an acceptance fixture.
+  - Invokes the real `codegraph bench` subcommands for lookup, memory-for, read, and index performance checks.
+
+Step 11 intentionally does not add:
+
+- new benchmark storage format
+- CI integration
+- background daemon
 
 ## Verification commands
 
@@ -464,6 +571,10 @@ cmake --build build
 ./build/codegraph test-memory
 ./build/codegraph test-graph
 ./build/codegraph test-mcp
+./build/codegraph test-acceptance
+./build/codegraph init /tmp/some-repo
+./build/codegraph doctor
+./build/codegraph bench index 1
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -472,12 +583,11 @@ cmake --build build
 
 ## Next milestone
 
-Acceptance cleanup / doctor polish.
+Post-acceptance polish.
 
 Scope from the spec:
 
-- Fill any remaining §12 acceptance gaps.
-- Tighten doctor output around runtime dependencies and repository state.
+- Improve UX and packaging around installing/running CodeGraph in other repositories.
 - Keep MCP stdio behavior stable while adding polish.
 
 Do not add new language frontends yet.

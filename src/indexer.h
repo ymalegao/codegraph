@@ -16,6 +16,7 @@ struct IndexOptions {
 
 struct IndexResult {
     uint32_t files_indexed = 0;
+    uint32_t files_unchanged = 0;
     uint32_t files_pruned = 0;
     uint32_t symbols_indexed = 0;
     uint32_t contains_edges = 0;

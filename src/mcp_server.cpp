@@ -33,6 +33,7 @@ struct McpContext {
     IndexOptions options;
     std::filesystem::path codegraph_dir;
     GraphIndex graph;
+    int64_t data_version = 0;
     std::ofstream log;
 };
 
@@ -42,6 +43,8 @@ struct ToolDefinition {
     json input_schema;
     std::function<json(McpContext&, const json&)> handler;
 };
+
+int64_t sqlite_data_version(Storage& storage);
 
 std::string required_string(const json& args, std::string_view key) {
     const auto it = args.find(key);
@@ -241,7 +244,7 @@ json read_graph_symbol(McpContext& ctx, const GraphSymbolView& symbol) {
         {"node_id", to_u32(symbol.node_id)},
         {"qualified_name", current->qualified_name},
         {"name", current->name},
-        {"kind", current->kind},
+        {"kind", symbol_kind_text(symbol_kind_from_string(current->kind))},
         {"file", symbol.path},
         {"path", symbol.path},
         {"start_line", current->start_line},
@@ -303,8 +306,11 @@ json search_symbol_json(McpContext& ctx, const json& args) {
 
 json file_range_json(McpContext& ctx, const json& args) {
     const std::string path = required_string(args, "path");
-    const uint32_t start = optional_u32(args, "start_line", 0);
-    const uint32_t end = optional_u32(args, "end_line", 0);
+    const uint32_t start = optional_u32(args, "start_line", 1);
+    const uint32_t end = optional_u32(args, "end_line", 1);
+    if (start == 0 || end == 0) {
+        throw std::runtime_error("start_line and end_line must be 1-based");
+    }
     const FileRangeResult range = read_file_range(ctx.options.repo_root, path, start, end);
     return {
         {"path", range.path},
@@ -434,6 +440,7 @@ json record_correction_json(McpContext& ctx, const json& args) {
     const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
     const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
     ctx.graph = build_graph_index(ctx.storage);
+    ctx.data_version = sqlite_data_version(ctx.storage);
     return {
         {"op_id", op_id},
         {"node_id", node_id},
@@ -457,6 +464,7 @@ json record_decision_json(McpContext& ctx, const json& args) {
     const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
     const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
     ctx.graph = build_graph_index(ctx.storage);
+    ctx.data_version = sqlite_data_version(ctx.storage);
     return {
         {"op_id", op_id},
         {"node_id", node_id},
@@ -607,6 +615,31 @@ void log_line(McpContext& ctx, std::string_view message) {
     }
 }
 
+int64_t sqlite_data_version(Storage& storage) {
+    Statement stmt(storage.handle(), "PRAGMA data_version;");
+    stmt.expect_row("read sqlite data_version");
+    return sqlite3_column_int64(stmt.get(), 0);
+}
+
+bool read_tool_name(std::string_view name) {
+    return name == "find_symbol" ||
+           name == "read_symbol" ||
+           name == "read_enclosing_symbol" ||
+           name == "read_file_range" ||
+           name == "get_memory_for_file" ||
+           name == "get_memory_for_symbol" ||
+           name == "search_symbol";
+}
+
+void rebuild_graph_if_external_change(McpContext& ctx) {
+    const int64_t current = sqlite_data_version(ctx.storage);
+    if (current != ctx.data_version) {
+        ctx.graph = build_graph_index(ctx.storage);
+        ctx.data_version = current;
+        log_line(ctx, "rebuilt graph after external sqlite commit");
+    }
+}
+
 std::optional<json> handle_request(
     McpContext& ctx,
     const std::vector<ToolDefinition>& tools,
@@ -654,6 +687,9 @@ std::optional<json> handle_request(
         }
 
         try {
+            if (read_tool_name(name)) {
+                rebuild_graph_if_external_change(ctx);
+            }
             return tool_response(id, it->handler(ctx, args), false);
         } catch (const std::exception& ex) {
             log_line(ctx, std::string("tool failed: ") + name + ": " + ex.what());
@@ -682,6 +718,7 @@ int run_mcp_server(
         options,
         codegraph_dir,
         build_graph_index(storage),
+        sqlite_data_version(storage),
         std::ofstream(codegraph_dir / "logs" / "mcp.log", std::ios::app),
     };
     const std::vector<ToolDefinition> tools = tool_registry();

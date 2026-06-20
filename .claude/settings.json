@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .codegraph/logs && ./build/codegraph init >> .codegraph/logs/hook.log 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .codegraph/logs && ./build/codegraph index >> .codegraph/logs/hook.log 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .codegraph/logs && ./build/codegraph index >> .codegraph/logs/hook.log 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

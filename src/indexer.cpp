@@ -16,6 +16,7 @@ namespace {
 struct FileRow {
     int64_t file_id = 0;
     std::string path;
+    std::string content_hash;
     std::string commit_hash;
 };
 
@@ -27,7 +28,7 @@ struct IndexedSymbol {
 std::vector<FileRow> load_files_for_language(sqlite3* db, std::string_view language) {
     Statement stmt(
         db,
-        "SELECT file_id, path, COALESCE(commit_hash, '') "
+        "SELECT file_id, path, content_hash, COALESCE(commit_hash, '') "
         "FROM files WHERE language = ? ORDER BY path;"
     );
     bind_text(stmt.get(), 1, language);
@@ -38,6 +39,7 @@ std::vector<FileRow> load_files_for_language(sqlite3* db, std::string_view langu
             sqlite3_column_int64(stmt.get(), 0),
             column_text(stmt.get(), 1),
             column_text(stmt.get(), 2),
+            column_text(stmt.get(), 3),
         });
     }
     return files;
@@ -78,7 +80,7 @@ int64_t insert_symbol_row(sqlite3* db, Statement& insert_symbol_stmt, const File
     bind_int64(insert_symbol_stmt.get(), 8, symbol.start_byte);
     bind_int64(insert_symbol_stmt.get(), 9, symbol.end_byte);
     bind_text(insert_symbol_stmt.get(), 10, symbol.content_hash);
-    bind_text(insert_symbol_stmt.get(), 11, file.commit_hash);
+    bind_text(insert_symbol_stmt.get(), 11, file.content_hash);
     insert_symbol_stmt.expect_done("insert symbol");
     return sqlite3_last_insert_rowid(db);
 }
@@ -106,6 +108,17 @@ void insert_edge_row(
     bind_text(insert_edge_stmt.get(), 4, kind);
     bind_int64(insert_edge_stmt.get(), 5, resolved ? 1 : 0);
     insert_edge_stmt.expect_done("insert edge");
+}
+
+bool source_projection_is_current(sqlite3* db, const FileRow& file) {
+    Statement stmt(
+        db,
+        "SELECT COUNT(*) FROM symbols WHERE file_id = ? AND commit_hash = ?;"
+    );
+    bind_int64(stmt.get(), 1, file.file_id);
+    bind_text(stmt.get(), 2, file.content_hash);
+    stmt.expect_row("count current symbols");
+    return sqlite3_column_int64(stmt.get(), 0) > 0;
 }
 
 }  // namespace
@@ -157,6 +170,11 @@ IndexResult index_repository(
                         true
                     );
                     ++result.files_pruned;
+                    continue;
+                }
+
+                if (source_projection_is_current(storage.handle(), file)) {
+                    ++result.files_unchanged;
                     continue;
                 }
 

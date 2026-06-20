@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "bootstrap.h"
 #include "core.h"
 #include "cpp_frontend.h"
 #include "graph_store.h"
@@ -123,6 +124,26 @@ int run_command_count_lines(const std::string& command) {
         throw std::runtime_error("command failed: " + command);
     }
     return lines;
+}
+
+std::string run_command_capture(const std::string& command) {
+    std::array<char, 512> buffer{};
+    std::string output;
+
+    FILE* pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr) {
+        throw std::runtime_error("failed to run command: " + command);
+    }
+
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        output += buffer.data();
+    }
+
+    const int rc = pclose(pipe);
+    if (rc != 0) {
+        throw std::runtime_error("command failed: " + command + "\n" + output);
+    }
+    return output;
 }
 
 uint32_t rg_text_count(const std::filesystem::path& repo_root, const std::string& text) {
@@ -385,6 +406,13 @@ int command_version() {
     return 0;
 }
 
+std::filesystem::path command_repo_root(const std::string* path) {
+    if (path == nullptr) {
+        return std::filesystem::current_path();
+    }
+    return std::filesystem::weakly_canonical(*path);
+}
+
 int command_doctor_deps() {
     std::cout << "codegraph dependency doctor\n";
 
@@ -425,6 +453,120 @@ int command_doctor_deps() {
 
 
     std::cout << "all dependencies: ok\n";
+    return 0;
+}
+
+struct DoctorCheck {
+    std::string name;
+    int64_t failures = 0;
+};
+
+int command_doctor(const std::string* path) {
+    const std::filesystem::path repo_root = command_repo_root(path);
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+    const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
+
+    std::cout << "codegraph doctor\n";
+    std::cout << "repo: " << repo_root.generic_string() << "\n";
+    std::cout << "db: " << db_path.generic_string() << "\n";
+
+    if (!std::filesystem::exists(db_path)) {
+        std::cout << "initialized: no\n";
+        std::cout << "doctor: failed\n";
+        return 1;
+    }
+
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+
+    std::vector<DoctorCheck> checks{
+        {"schema_user_version", storage.query_int("PRAGMA user_version;") == 1 ? 0 : 1},
+        {"files_without_line_table",
+         storage.query_int(
+             "SELECT COUNT(*) FROM files f "
+             "LEFT JOIN line_tables lt ON lt.file_id = f.file_id "
+             "WHERE lt.file_id IS NULL;"
+         )},
+        {"line_tables_without_file",
+         storage.query_int(
+             "SELECT COUNT(*) FROM line_tables lt "
+             "LEFT JOIN files f ON f.file_id = lt.file_id "
+             "WHERE f.file_id IS NULL;"
+         )},
+        {"symbols_without_file",
+         storage.query_int(
+             "SELECT COUNT(*) FROM symbols s "
+             "LEFT JOIN files f ON f.file_id = s.file_id "
+             "WHERE f.file_id IS NULL;"
+         )},
+        {"nodes_bad_kind",
+         storage.query_int(
+             "SELECT COUNT(*) FROM nodes "
+             "WHERE kind NOT IN ('file','symbol','correction','arch_decision');"
+         )},
+        {"nodes_bad_status",
+         storage.query_int(
+             "SELECT COUNT(*) FROM nodes "
+             "WHERE status NOT IN ('active','tombstoned','stale');"
+         )},
+        {"edges_without_from_node",
+         storage.query_int(
+             "SELECT COUNT(*) FROM edges e "
+             "LEFT JOIN nodes n ON n.node_id = e.from_node "
+             "WHERE n.node_id IS NULL;"
+         )},
+        {"resolved_edges_without_to_node",
+         storage.query_int(
+             "SELECT COUNT(*) FROM edges e "
+             "LEFT JOIN nodes n ON n.node_id = e.to_node "
+             "WHERE e.resolved = 1 AND (e.to_node IS NULL OR n.node_id IS NULL);"
+         )},
+        {"resolved_edges_with_to_ref_only",
+         storage.query_int(
+             "SELECT COUNT(*) FROM edges "
+             "WHERE resolved = 1 AND to_node IS NULL;"
+         )},
+        {"memories_without_node",
+         storage.query_int(
+             "SELECT COUNT(*) FROM memories m "
+             "LEFT JOIN nodes n ON n.node_id = m.node_id "
+             "WHERE n.node_id IS NULL;"
+         )},
+        {"path_rules_without_node",
+         storage.query_int(
+             "SELECT COUNT(*) FROM path_rules pr "
+             "LEFT JOIN nodes n ON n.node_id = pr.node_id "
+             "WHERE n.node_id IS NULL;"
+         )},
+        {"fts_symbols_row_drift",
+         storage.query_int(
+             "SELECT ABS((SELECT COUNT(*) FROM symbols) - "
+             "(SELECT COUNT(*) FROM fts_symbols));"
+         )},
+        {"fts_memories_row_drift",
+         storage.query_int(
+             "SELECT ABS((SELECT COUNT(*) FROM memories) - "
+             "(SELECT COUNT(*) FROM fts_memories));"
+         )},
+    };
+
+    int64_t total_failures = 0;
+    for (const DoctorCheck& check : checks) {
+        total_failures += check.failures;
+        std::cout << check.name << ": " << check.failures << "\n";
+    }
+    std::cout << "files: " << storage.query_int("SELECT COUNT(*) FROM files;") << "\n";
+    std::cout << "symbols: " << storage.query_int("SELECT COUNT(*) FROM symbols;") << "\n";
+    std::cout << "nodes: " << storage.query_int("SELECT COUNT(*) FROM nodes;") << "\n";
+    std::cout << "edges: " << storage.query_int("SELECT COUNT(*) FROM edges;") << "\n";
+    std::cout << "memories: " << storage.query_int("SELECT COUNT(*) FROM memories;") << "\n";
+
+    if (total_failures != 0) {
+        std::cout << "doctor: failed\n";
+        return 1;
+    }
+
+    std::cout << "doctor: ok\n";
     return 0;
 }
 
@@ -588,9 +730,36 @@ int command_test_storage() {
     return 0;
 }
 
-int command_scan() {
-    const std::filesystem::path repo_root = std::filesystem::current_path();
+int command_init(const std::string* path) {
+    const std::filesystem::path repo_root = command_repo_root(path);
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+    const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+
+    std::filesystem::create_directories(codegraph_dir);
+    codegraph::Storage storage(db_path);
+    const codegraph::BootstrapResult result =
+        codegraph::bootstrap_repository(storage, registry, repo_root, codegraph_dir);
+
+    std::cout << "init: ok\n";
+    std::cout << "repo: " << repo_root.generic_string() << "\n";
+    std::cout << "repo_id: " << result.config.repo_id << "\n";
+    std::cout << "db: " << db_path.generic_string() << "\n";
+    std::cout << "device_id: " << codegraph::ensure_device_id(codegraph_dir) << "\n";
+    std::cout << "scan_files_seen: " << result.scan.files_seen << "\n";
+    std::cout << "scan_files_indexed: " << result.scan.files_indexed << "\n";
+    std::cout << "scan_files_unchanged: " << result.scan.files_unchanged << "\n";
+    std::cout << "indexed_files: " << result.index.files_indexed << "\n";
+    std::cout << "index_files_unchanged: " << result.index.files_unchanged << "\n";
+    std::cout << "ops_applied: " << result.materialize.ops_applied << "\n";
+    std::cout << "edges_resolved: " << result.materialize.edges_resolved << "\n";
+    return 0;
+}
+
+int command_scan(const std::string* path) {
+    const std::filesystem::path repo_root = command_repo_root(path);
     const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+    const codegraph::RepoConfig config = codegraph::load_or_create_config(repo_root);
     codegraph::FrontendRegistry registry = make_frontend_registry();
 
     std::filesystem::create_directories(db_path.parent_path());
@@ -600,7 +769,7 @@ int command_scan() {
     const codegraph::ScanResult result = codegraph::scan_repository(
         storage,
         registry,
-        codegraph::ScanOptions{repo_root}
+        codegraph::scan_options_for_config(repo_root, config)
     );
 
     std::cout << "scan: ok\n";
@@ -616,9 +785,11 @@ int command_scan() {
     return 0;
 }
 
-int command_index() {
-    const std::filesystem::path repo_root = std::filesystem::current_path();
-    const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+int command_index(const std::string* path) {
+    const std::filesystem::path repo_root = command_repo_root(path);
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+    const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
+    const codegraph::RepoConfig config = codegraph::load_or_create_config(repo_root);
     codegraph::FrontendRegistry registry = make_frontend_registry();
 
     std::filesystem::create_directories(db_path.parent_path());
@@ -628,13 +799,15 @@ int command_index() {
     const codegraph::ScanResult scan_result = codegraph::scan_repository(
         storage,
         registry,
-        codegraph::ScanOptions{repo_root}
+        codegraph::scan_options_for_config(repo_root, config)
     );
     const codegraph::IndexResult index_result = codegraph::index_repository(
         storage,
         registry,
-        codegraph::IndexOptions{repo_root}
+        codegraph::index_options_for_config(repo_root, config)
     );
+    const codegraph::MaterializeResult materialized =
+        codegraph::materialize(storage, codegraph_dir);
 
     std::cout << "index: ok\n";
     std::cout << "repo: " << repo_root.generic_string() << "\n";
@@ -644,10 +817,13 @@ int command_index() {
     std::cout << "scan_files_unchanged: " << scan_result.files_unchanged << "\n";
     std::cout << "scan_files_pruned: " << scan_result.files_pruned << "\n";
     std::cout << "indexed_files: " << index_result.files_indexed << "\n";
+    std::cout << "index_files_unchanged: " << index_result.files_unchanged << "\n";
     std::cout << "index_files_pruned: " << index_result.files_pruned << "\n";
     std::cout << "symbols_indexed: " << index_result.symbols_indexed << "\n";
     std::cout << "contains_edges: " << index_result.contains_edges << "\n";
     std::cout << "imports_edges: " << index_result.imports_edges << "\n";
+    std::cout << "ops_applied: " << materialized.ops_applied << "\n";
+    std::cout << "edges_resolved: " << materialized.edges_resolved << "\n";
     return 0;
 }
 
@@ -915,13 +1091,48 @@ uint64_t elapsed_ns(const std::chrono::steady_clock::time_point& start,
 
 int command_bench(const std::vector<std::string>& args) {
     if (args.empty()) {
-        throw std::runtime_error("usage: codegraph bench memory-for <target> [repetitions]");
+        throw std::runtime_error("usage: codegraph bench lookup|memory-for|read|index <target> [repetitions]");
     }
 
     const std::filesystem::path repo_root = std::filesystem::current_path();
     const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
     codegraph::Storage storage(db_path);
     storage.initialize_schema();
+
+    if (args[0] == "index") {
+        const uint32_t repetitions = args.size() >= 2U ? static_cast<uint32_t>(std::stoul(args[1])) : 1U;
+        codegraph::FrontendRegistry registry = make_frontend_registry();
+        const codegraph::RepoConfig config = codegraph::load_or_create_config(repo_root);
+
+        uint32_t scan_indexed = 0;
+        uint32_t index_indexed = 0;
+        uint32_t index_unchanged = 0;
+        const auto start = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < repetitions; ++i) {
+            const codegraph::ScanResult scan = codegraph::scan_repository(
+                storage,
+                registry,
+                codegraph::scan_options_for_config(repo_root, config)
+            );
+            const codegraph::IndexResult index = codegraph::index_repository(
+                storage,
+                registry,
+                codegraph::index_options_for_config(repo_root, config)
+            );
+            scan_indexed += scan.files_indexed;
+            index_indexed += index.files_indexed;
+            index_unchanged += index.files_unchanged;
+        }
+        const auto end = std::chrono::steady_clock::now();
+
+        std::cout << "bench: index\n";
+        std::cout << "repetitions: " << repetitions << "\n";
+        std::cout << "scan_files_indexed: " << scan_indexed << "\n";
+        std::cout << "indexed_files: " << index_indexed << "\n";
+        std::cout << "index_files_unchanged: " << index_unchanged << "\n";
+        std::cout << "ns_total: " << elapsed_ns(start, end) << "\n";
+        return 0;
+    }
 
     if (args[0] == "lookup") {
         if (args.size() < 2U) {
@@ -1749,7 +1960,6 @@ int command_test_mcp() {
     const std::filesystem::path fixture_dir = test_repo / "testing";
     const std::filesystem::path fixture_file = fixture_dir / "codegraph_mcp_target.cpp";
     const std::filesystem::path codegraph_dir = test_repo / ".codegraph";
-    const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
     const std::filesystem::path script_path = test_repo / "mcp-script.jsonl";
     const std::filesystem::path stdout_path = test_repo / "mcp-stdout.jsonl";
     const std::filesystem::path stderr_path = test_repo / "mcp-stderr.log";
@@ -1758,7 +1968,6 @@ int command_test_mcp() {
     std::filesystem::remove_all(test_repo, ignored);
     RemoveTreeOnExit remove_test_repo{test_repo};
     std::filesystem::create_directories(fixture_dir);
-    std::filesystem::create_directories(codegraph_dir);
 
     write_file(
         fixture_file,
@@ -1768,25 +1977,6 @@ int command_test_mcp() {
         "}\n"
         "}\n"
     );
-
-    codegraph::FrontendRegistry registry = make_frontend_registry();
-    {
-        codegraph::Storage storage(db_path);
-        storage.initialize_schema();
-        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{test_repo});
-        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{test_repo});
-        (void)codegraph::append_correction_op(
-            codegraph_dir,
-            codegraph::CorrectionInput{
-                "Initial MCP correction",
-                "Initial MCP memory",
-                {"testing/**"},
-                {},
-                {"testing/codegraph_mcp_target.cpp::mcpstep::target"},
-            }
-        );
-        (void)codegraph::materialize(storage, codegraph_dir);
-    }
 
     {
         std::ofstream script(script_path);
@@ -1800,6 +1990,7 @@ int command_test_mcp() {
         script << R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"read_enclosing_symbol","arguments":{"path":"testing/codegraph_mcp_target.cpp","line":2}}})" << "\n";
         script << R"({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"record_correction","arguments":{"reason":"MCP correction reason","affects":["testing/codegraph_mcp_target.cpp"],"prefer_paths":["testing/**"]}}})" << "\n";
         script << R"({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_memory_for_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"read_symbol","arguments":{"query":"mcpstep::target","include_memory":true}}})" << "\n";
     }
 
     const std::string command =
@@ -1820,7 +2011,7 @@ int command_test_mcp() {
         }
         responses.push_back(nlohmann::json::parse(line));
     }
-    require(responses.size() == 9U, "mcp stdout did not contain expected JSON-RPC responses only");
+    require(responses.size() == 10U, "mcp stdout did not contain expected JSON-RPC responses only");
 
     auto response_by_id = [&](int id) -> nlohmann::json {
         for (const nlohmann::json& response : responses) {
@@ -1839,15 +2030,15 @@ int command_test_mcp() {
 
     require(response_by_id(1)["result"]["capabilities"].contains("tools"), "mcp initialize missing tools");
     require(response_by_id(2)["result"]["tools"].size() >= 8U, "mcp tools/list returned too few tools");
+    require(std::filesystem::exists(codegraph_dir / "config.yaml"), "mcp did not self-bootstrap config");
+    require(std::filesystem::exists(codegraph_dir / "device_id"), "mcp did not self-bootstrap device id");
     require(!tool_text(3).empty(), "mcp find_symbol returned no graph matches");
 
     const nlohmann::json read = tool_text(4);
     require(read["hash_status"] == "ok", "mcp read_symbol did not use verified fast path");
     require(read["body"].get<std::string>().find("return 9") != std::string::npos,
             "mcp read_symbol returned wrong body");
-    require(!read["memory"]["corrections"].empty(), "mcp read_symbol did not bundle memory");
 
-    require(!tool_text(5)["corrections"].empty(), "mcp get_memory_for_file returned no memory");
     require(!tool_text(6).empty(), "mcp search_symbol returned no FTS matches");
     require(
         tool_text(7)["qualified_name"] == "mcpstep::target",
@@ -1865,6 +2056,7 @@ int command_test_mcp() {
         }
     }
     require(saw_recorded, "mcp graph was not rebuilt after record_correction");
+    require(!tool_text(10)["memory"]["corrections"].empty(), "mcp read_symbol did not bundle memory");
 
     std::cout << "mcp jsonrpc: ok\n";
     std::cout << "mcp tools: ok\n";
@@ -1873,14 +2065,171 @@ int command_test_mcp() {
     return 0;
 }
 
+uint64_t output_u64_value(const std::string& output, std::string_view key) {
+    const std::string prefix = std::string(key) + ": ";
+    const size_t pos = output.find(prefix);
+    if (pos == std::string::npos) {
+        throw std::runtime_error("missing output key: " + std::string(key) + "\n" + output);
+    }
+    const size_t start = pos + prefix.size();
+    const size_t end = output.find('\n', start);
+    return static_cast<uint64_t>(std::stoull(output.substr(start, end - start)));
+}
+
+void acceptance_two_op_streams() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path db_path =
+        repo_root / "build" / "codegraph-test-acceptance-streams.sqlite";
+    const std::filesystem::path codegraph_dir =
+        repo_root / "build" / "codegraph-test-acceptance-streams-cg";
+    const std::filesystem::path fixture_file =
+        repo_root / "testing" / "codegraph_acceptance_stream.cpp";
+    const std::string target_ref = "testing/codegraph_acceptance_stream.cpp";
+
+    std::error_code ignored;
+    std::filesystem::remove(db_path, ignored);
+    std::filesystem::remove_all(codegraph_dir, ignored);
+    std::filesystem::remove(fixture_file, ignored);
+    RemoveTreeOnExit remove_codegraph_dir{codegraph_dir};
+    RemoveOnExit remove_fixture_file{fixture_file};
+
+    write_file(
+        fixture_file,
+        "namespace acceptance_stream {\n"
+        "int target() { return 1; }\n"
+        "}\n"
+    );
+
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    codegraph::Storage storage(db_path);
+    storage.initialize_schema();
+    (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
+    (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+
+    std::filesystem::create_directories(codegraph_dir);
+    write_file(codegraph_dir / "device_id", "machine-a\n");
+    (void)codegraph::append_correction_op(
+        codegraph_dir,
+        codegraph::CorrectionInput{
+            "Machine A correction",
+            "Machine A reason",
+            {},
+            {},
+            {target_ref},
+        }
+    );
+    write_file(codegraph_dir / "device_id", "machine-b\n");
+    (void)codegraph::append_decision_op(
+        codegraph_dir,
+        codegraph::DecisionInput{
+            "Machine B decision",
+            "Machine B body",
+            {target_ref},
+        }
+    );
+
+    const codegraph::MaterializeResult materialized =
+        codegraph::materialize(storage, codegraph_dir);
+    require(materialized.ops_applied == 2U, "two op streams did not both apply");
+    require(storage.query_int("SELECT COUNT(*) FROM memories;") == 2,
+            "two op streams did not produce two memories");
+    require(storage.query_int("SELECT COUNT(*) FROM op_index;") == 2,
+            "two op streams did not produce two op_index rows");
+}
+
+void acceptance_doctor_and_bench() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path exe_path = std::filesystem::read_symlink("/proc/self/exe");
+    const std::filesystem::path test_repo = repo_root / "build" / "codegraph-test-acceptance-repo";
+    const std::filesystem::path source_dir = test_repo / "src";
+    const std::filesystem::path source_file = source_dir / "accept.cpp";
+
+    std::error_code ignored;
+    std::filesystem::remove_all(test_repo, ignored);
+    RemoveTreeOnExit remove_test_repo{test_repo};
+    std::filesystem::create_directories(source_dir);
+    write_file(
+        source_file,
+        "namespace accept {\n"
+        "int target() {\n"
+        "    return 1;\n"
+        "}\n"
+        "}\n"
+    );
+
+    const auto run_in_repo = [&](const std::string& command) {
+        return run_command_capture(
+            "cd " + shell_quote(test_repo.string()) + " && " +
+            shell_quote(exe_path.string()) + " " + command + " 2>&1"
+        );
+    };
+
+    (void)run_command_capture(shell_quote(exe_path.string()) + " init " + shell_quote(test_repo.string()) + " 2>&1");
+    (void)run_in_repo("correct --reason " + shell_quote("Acceptance memory") +
+                      " --affects src/accept.cpp --prefer " + shell_quote("src/**"));
+    const std::string doctor = run_command_capture(
+        shell_quote(exe_path.string()) + " doctor " + shell_quote(test_repo.string()) + " 2>&1"
+    );
+    require(doctor.find("doctor: ok") != std::string::npos, "doctor did not pass acceptance repo\n" + doctor);
+
+    constexpr uint64_t kSymbolLookupNs = 10'000'000ULL;
+    constexpr uint64_t kMemoryForNs = 20'000'000ULL;
+    constexpr uint64_t kReadNs = 10'000'000ULL;
+    constexpr uint64_t kIndexNs = 100'000'000ULL;
+    constexpr uint64_t kRepetitions = 10ULL;
+
+    const std::string lookup = run_in_repo("bench lookup accept::target 10");
+    require(output_u64_value(lookup, "graph_ns_total") / kRepetitions < kSymbolLookupNs,
+            "bench lookup missed symbol lookup target\n" + lookup);
+
+    const std::string memory = run_in_repo("bench memory-for src/accept.cpp 10");
+    require(output_u64_value(memory, "csr_ns_total") / kRepetitions < kMemoryForNs,
+            "bench memory-for missed memory target\n" + memory);
+
+    const std::string read = run_in_repo("bench read accept::target 10");
+    require(output_u64_value(read, "ns_total") / kRepetitions < kReadNs,
+            "bench read missed exact read target\n" + read);
+
+    write_file(
+        source_file,
+        "namespace accept {\n"
+        "int target() {\n"
+        "    return 2;\n"
+        "}\n"
+        "}\n"
+    );
+    const std::string index = run_in_repo("bench index 1");
+    require(output_u64_value(index, "ns_total") < kIndexNs,
+            "bench index missed incremental index target\n" + index);
+}
+
+int command_test_acceptance() {
+    command_test_scan();
+    command_test_index();
+    command_test_read();
+    command_test_memory_reads();
+    command_test_materialize();
+    acceptance_two_op_streams();
+    acceptance_doctor_and_bench();
+
+    std::cout << "acceptance scan/index: ok\n";
+    std::cout << "acceptance exact reads: ok\n";
+    std::cout << "acceptance memory/materialize: ok\n";
+    std::cout << "acceptance multi-stream ops: ok\n";
+    std::cout << "acceptance doctor/bench: ok\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
         << "  codegraph --version\n"
         << "  codegraph doctor-deps\n"
-        << "  codegraph scan\n"
-        << "  codegraph index\n"
-        << "  codegraph mcp\n"
+        << "  codegraph doctor [path]\n"
+        << "  codegraph init [path]\n"
+        << "  codegraph scan [path]\n"
+        << "  codegraph index [path]\n"
+        << "  codegraph mcp [path]\n"
         << "  codegraph find-symbol <name>\n"
         << "  codegraph search-symbol <query> [--kind K] [--limit N]\n"
         << "  codegraph read-symbol <name>\n"
@@ -1890,6 +2239,7 @@ void print_usage() {
         << "  codegraph materialize\n"
         << "  codegraph memory-for <path-or-symbol>\n"
         << "  codegraph bench lookup|memory-for|read <target> [repetitions]\n"
+        << "  codegraph bench index [repetitions]\n"
         << "  codegraph parse-smoke <path>\n"
         << "  codegraph test-core\n"
         << "  codegraph test-storage\n"
@@ -1899,7 +2249,8 @@ void print_usage() {
         << "  codegraph test-materialize\n"
         << "  codegraph test-memory\n"
         << "  codegraph test-graph\n"
-        << "  codegraph test-mcp\n";
+        << "  codegraph test-mcp\n"
+        << "  codegraph test-acceptance\n";
 }
 
 
@@ -1915,25 +2266,43 @@ int main(int argc, char** argv) {
             return command_doctor_deps();
         }
 
-        if (argc == 2 && std::strcmp(argv[1], "scan") == 0) {
-            return command_scan();
+        if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "doctor") == 0) {
+            const std::string path = argc == 3 ? argv[2] : "";
+            return command_doctor(argc == 3 ? &path : nullptr);
         }
 
-        if (argc == 2 && std::strcmp(argv[1], "index") == 0) {
-            return command_index();
+        if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "init") == 0) {
+            const std::string path = argc == 3 ? argv[2] : "";
+            return command_init(argc == 3 ? &path : nullptr);
         }
 
-        if (argc == 2 && std::strcmp(argv[1], "mcp") == 0) {
-            const std::filesystem::path repo_root = std::filesystem::current_path();
-            const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+        if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "scan") == 0) {
+            const std::string path = argc == 3 ? argv[2] : "";
+            return command_scan(argc == 3 ? &path : nullptr);
+        }
+
+        if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "index") == 0) {
+            const std::string path = argc == 3 ? argv[2] : "";
+            return command_index(argc == 3 ? &path : nullptr);
+        }
+
+        if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "mcp") == 0) {
+            const std::string path = argc == 3 ? argv[2] : "";
+            const std::filesystem::path repo_root = command_repo_root(argc == 3 ? &path : nullptr);
             const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+            const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
+            std::filesystem::create_directories(codegraph_dir);
             codegraph::Storage storage(db_path);
             storage.initialize_schema();
             codegraph::FrontendRegistry registry = make_frontend_registry();
+            if (codegraph::bootstrap_needed(storage, codegraph_dir)) {
+                (void)codegraph::bootstrap_repository(storage, registry, repo_root, codegraph_dir);
+            }
+            const codegraph::RepoConfig config = codegraph::load_or_create_config(repo_root);
             return codegraph::run_mcp_server(
                 storage,
                 registry,
-                codegraph::IndexOptions{repo_root},
+                codegraph::index_options_for_config(repo_root, config),
                 codegraph_dir
             );
         }
@@ -2028,6 +2397,10 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-mcp") == 0) {
             return command_test_mcp();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-acceptance") == 0) {
+            return command_test_acceptance();
         }
 
         print_usage();

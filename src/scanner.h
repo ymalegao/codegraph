@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "frontend.h"
@@ -15,6 +16,18 @@ struct ScanOptions {
     std::filesystem::path repo_root;
     std::string repo_id = "local";
     size_t max_file_size_bytes = 10U * 1024U * 1024U;
+    std::vector<std::string> ignore_patterns;
+
+    explicit ScanOptions(
+        std::filesystem::path root = {},
+        std::string id = "local",
+        size_t max_size = 10U * 1024U * 1024U,
+        std::vector<std::string> ignores = {}
+    )
+        : repo_root(std::move(root)),
+          repo_id(std::move(id)),
+          max_file_size_bytes(max_size),
+          ignore_patterns(std::move(ignores)) {}
 };
 
 struct ScanResult {

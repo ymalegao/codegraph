@@ -491,9 +491,9 @@ Design rules for the tool surface: complete spans never chunks; always include `
 ## 11. CLI
 
 ```
-codegraph init                                   # create .codegraph/, device_id, config
-codegraph scan                                   # walk + hash + line tables + git state
-codegraph index                                  # tree-sitter symbols/spans/edges (implies scan)
+codegraph init [path]                            # create .codegraph/, device_id, config
+codegraph scan [path]                            # walk + hash + line tables + git state
+codegraph index [path]                           # tree-sitter symbols/spans/edges (implies scan)
 codegraph read-file <path> --start N --end M     # exact range
 codegraph find-symbol <name>
 codegraph read-symbol <name>
@@ -501,9 +501,9 @@ codegraph remember --title T --body B --affects P [--affects P2 ...]   # ADD_DEC
 codegraph correct  --prefer G [--avoid G2 ...] --affects P --reason R   # ADD_CORRECTION
 codegraph memory-for <path>
 codegraph materialize                            # fold op log -> SQLite (auto after writes)
-codegraph doctor                                 # integrity checks (orphan edges, fts drift, etc.)
-codegraph bench lookup|memory-for|read           # latency measurement
-codegraph mcp                                    # launch the MCP stdio server
+codegraph doctor [path]                          # integrity checks (orphan edges, fts drift, etc.)
+codegraph bench lookup|memory-for|read|index      # latency measurement
+codegraph mcp [path]                              # launch the MCP stdio server
 ```
 
 The CLI is the human surface (setup, authoring memory, maintenance, inspection). The query/read tools listed in §10 are the agent-facing MCP surface; the CLI versions (`find-symbol`, `search-symbol`, `read-symbol`, `read-file`, `memory-for`) exist for local inspection and testing only.
@@ -524,7 +524,8 @@ Each step has a done-criterion. Do them in order.
 7. **Memory reads** (§10 `get_memory_for_*` via reverse edges). *Done:* after a correction on `resdb/**`, `memory-for resdb/app/x.cc` shows it with reason; `bftsmart/**` shows the avoid rule.
 8. **CSR + sorted indexes** (§5). *Done:* `bench` meets §14 targets.
 9. **MCP server** (§10 stdio JSON-RPC). *Done:* a JSON-RPC script drives `find_symbol`, `read_symbol`, `read_enclosing_symbol`, `get_memory_for_file`, `search_symbol`, and `record_correction` correctly.
-10. **doctor + bench + acceptance tests** (§13). *Done:* all §13 tests green.
+10. **Launch-anywhere + hooks + auto-freshness.** *Done:* `init [path]` bootstraps a repo; `mcp [path]` self-bootstraps; hooks run init/index; the server rebuilds its graph when another process updates SQLite; incremental index skips unchanged files.
+11. **doctor + bench + acceptance tests** (§13). *Done:* all §13 tests green.
 
 ---
 

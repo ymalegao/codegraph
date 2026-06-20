@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+build_dir="build"
+build_type="Debug"
+do_install=1
+do_build=1
+do_init=0
+
+usage() {
+  cat <<'EOF'
+Usage: ./setup [options]
+
+Installs CodeGraph host dependencies, configures CMake, builds ./build/codegraph,
+and runs the dependency doctor. CMake/CPM downloads tree-sitter grammars and
+header-only libraries during configure.
+
+Options:
+  --check             Only check for required tools and libraries.
+  --no-install        Do not install system packages; just check/build.
+  --no-build          Install/check dependencies but skip CMake configure/build.
+  --init              Run ./build/codegraph init after a successful build.
+  --release           Build with CMAKE_BUILD_TYPE=Release.
+  --build-type TYPE   Build with an explicit CMAKE_BUILD_TYPE.
+  --build-dir DIR     Use a different build directory.
+  -h, --help          Show this help.
+EOF
+}
+
+log() {
+  printf '==> %s\n' "$*"
+}
+
+warn() {
+  printf 'warning: %s\n' "$*" >&2
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+sudo_if_needed() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check)
+      do_install=0
+      do_build=0
+      ;;
+    --no-install)
+      do_install=0
+      ;;
+    --no-build)
+      do_build=0
+      ;;
+    --init)
+      do_init=1
+      ;;
+    --release)
+      build_type="Release"
+      ;;
+    --build-type)
+      shift
+      [ "$#" -gt 0 ] || die "--build-type requires a value"
+      build_type="$1"
+      ;;
+    --build-dir)
+      shift
+      [ "$#" -gt 0 ] || die "--build-dir requires a value"
+      build_dir="$1"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+  shift
+done
+
+setup_macos_env() {
+  if have brew; then
+    local brew_prefix
+    brew_prefix="$(brew --prefix)"
+    export PKG_CONFIG_PATH="${brew_prefix}/lib/pkgconfig:${brew_prefix}/opt/sqlite/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export CMAKE_PREFIX_PATH="${brew_prefix}/opt/sqlite;${brew_prefix}${CMAKE_PREFIX_PATH:+;${CMAKE_PREFIX_PATH}}"
+  fi
+}
+
+install_macos() {
+  if ! xcode-select -p >/dev/null 2>&1; then
+    warn "Xcode Command Line Tools are required. Starting Apple's installer."
+    xcode-select --install || true
+    die "rerun ./setup after Xcode Command Line Tools finish installing"
+  fi
+
+  have brew || die "Homebrew is required on macOS. Install it from https://brew.sh/ and rerun ./setup"
+
+  log "Installing macOS packages with Homebrew"
+  brew install cmake ninja pkg-config sqlite xxhash git
+  setup_macos_env
+}
+
+install_linux() {
+  if have apt-get; then
+    log "Installing Linux packages with apt"
+    sudo_if_needed apt-get update
+    sudo_if_needed apt-get install -y build-essential cmake ninja-build pkg-config libsqlite3-dev libxxhash-dev git curl ca-certificates
+  elif have dnf; then
+    log "Installing Linux packages with dnf"
+    sudo_if_needed dnf install -y gcc gcc-c++ cmake ninja-build pkgconf-pkg-config sqlite-devel xxhash-devel git curl ca-certificates
+  elif have pacman; then
+    log "Installing Linux packages with pacman"
+    sudo_if_needed pacman -Sy --needed base-devel cmake ninja pkgconf sqlite xxhash git curl ca-certificates
+  else
+    die "unsupported Linux package manager. Install: C++ compiler, cmake, ninja, pkg-config, SQLite3 dev package, libxxhash dev package, git, curl, ca-certificates"
+  fi
+}
+
+check_deps() {
+  local missing=0
+
+  for tool in cmake git pkg-config; do
+    if ! have "$tool"; then
+      printf 'missing tool: %s\n' "$tool" >&2
+      missing=1
+    fi
+  done
+
+  if ! have ninja && ! have ninja-build; then
+    printf 'missing tool: ninja\n' >&2
+    missing=1
+  fi
+
+  if ! have c++ && ! have clang++ && ! have g++; then
+    printf 'missing tool: C++ compiler\n' >&2
+    missing=1
+  fi
+
+  if have pkg-config && ! pkg-config --exists libxxhash; then
+    printf 'missing pkg-config package: libxxhash\n' >&2
+    missing=1
+  fi
+
+  if have pkg-config && ! pkg-config --exists sqlite3; then
+    warn "sqlite3 was not found by pkg-config; CMake may still find SQLite through system paths"
+  fi
+
+  return "$missing"
+}
+
+configure_and_build() {
+  local generator_args=()
+  if have ninja || have ninja-build; then
+    generator_args=(-G Ninja)
+  fi
+
+  log "Configuring ${build_type} build in ${build_dir}"
+  cmake -S . -B "$build_dir" "${generator_args[@]}" -DCMAKE_BUILD_TYPE="$build_type"
+
+  log "Building codegraph"
+  cmake --build "$build_dir"
+
+  log "Running dependency doctor"
+  "${build_dir}/codegraph" doctor-deps
+}
+
+case "$(uname -s)" in
+  Darwin)
+    setup_macos_env
+    [ "$do_install" -eq 0 ] || install_macos
+    ;;
+  Linux)
+    [ "$do_install" -eq 0 ] || install_linux
+    ;;
+  *)
+    die "unsupported OS: $(uname -s)"
+    ;;
+esac
+
+log "Checking host dependencies"
+check_deps || die "dependency check failed"
+
+if [ "$do_build" -eq 1 ]; then
+  configure_and_build
+fi
+
+if [ "$do_init" -eq 1 ]; then
+  [ -x "${build_dir}/codegraph" ] || die "${build_dir}/codegraph does not exist; run without --no-build before --init"
+  log "Initializing CodeGraph in this repo"
+  "${build_dir}/codegraph" init
+fi
+
+log "setup complete"
+if [ "$do_build" -eq 1 ]; then
+  printf 'Next: %s init\n' "${build_dir}/codegraph"
+  printf 'MCP:  %s mcp\n' "${build_dir}/codegraph"
+fi

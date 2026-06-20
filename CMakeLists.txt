@@ -323,6 +323,29 @@ target_compile_options(codegraph_memory_reads PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_bootstrap
+  src/bootstrap.cpp
+)
+
+target_include_directories(codegraph_bootstrap PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_bootstrap PUBLIC
+  codegraph_sanitizers
+  codegraph_frontend
+  codegraph_indexer
+  codegraph_materializer
+  codegraph_scanner
+  codegraph_storage
+)
+
+target_compile_options(codegraph_bootstrap PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_library(codegraph_mcp_server
   src/mcp_server.cpp
 )
@@ -333,6 +356,7 @@ target_include_directories(codegraph_mcp_server PUBLIC
 
 target_link_libraries(codegraph_mcp_server PUBLIC
   codegraph_sanitizers
+  codegraph_bootstrap
   codegraph_frontend
   codegraph_graph_store
   codegraph_hash
@@ -355,6 +379,7 @@ add_executable(codegraph
 
 target_link_libraries(codegraph PRIVATE
   codegraph_core
+  codegraph_bootstrap
   codegraph_cpp_frontend
   codegraph_frontend
   codegraph_graph_store
