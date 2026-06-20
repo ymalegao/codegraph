@@ -398,6 +398,57 @@ Step 8 intentionally does not add:
 - MCP server
 - doctor command
 
+### Step 9: MCP stdio server
+
+Implemented in:
+
+- `src/mcp_server.h`
+- `src/mcp_server.cpp`
+- `src/graph_store.h`
+- `src/graph_store.cpp`
+- `src/memory_reads.h`
+- `src/memory_reads.cpp`
+- `src/main.cpp`
+- `CMakeLists.txt`
+
+Added:
+
+- CLI command: `./build/codegraph mcp`
+  - Long-lived newline-delimited JSON-RPC server over stdin/stdout.
+  - Emits protocol messages on stdout only.
+  - Sends logs to stderr and `.codegraph/logs/mcp.log`.
+- Single MCP tool registry used by both `tools/list` and `tools/call`.
+- Startup graph snapshot built once with `build_graph_index(storage)`.
+- Graph additions:
+  - in-memory `FileId -> {path, content_hash}` table
+  - file-node-by-path lookup
+  - typed symbol accessor from symbol `NodeId`
+- Graph-backed tools:
+  - `find_symbol`
+  - `read_symbol`
+  - `read_enclosing_symbol`
+  - `get_memory_for_file`
+  - `get_memory_for_symbol`
+- Disk-backed exact byte tool:
+  - `read_file_range`
+- SQLite-backed tools where the graph cannot serve the data:
+  - `search_symbol` via FTS5/BM25
+  - memory body/path-rule hydration
+- Write tools:
+  - `record_correction`
+  - `record_decision`
+  - Both append ops, materialize, return `node_id`, and rebuild the graph snapshot.
+- Manual smoke command: `./build/codegraph test-mcp`
+  - Runs `codegraph mcp` as a subprocess in an isolated throwaway repo.
+  - Verifies stdout is parseable JSON-RPC responses only.
+  - Verifies `initialize`, `tools/list`, graph `find_symbol`, graph+disk `read_symbol`, graph `read_enclosing_symbol`, graph+SQLite memory reads, FTS `search_symbol`, and write-triggered graph rebuild.
+
+Step 9 intentionally does not add:
+
+- HTTP transport
+- incremental graph rebuilds
+- MCP resources/prompts
+
 ## Verification commands
 
 Run from the repo root:
@@ -412,6 +463,7 @@ cmake --build build
 ./build/codegraph test-materialize
 ./build/codegraph test-memory
 ./build/codegraph test-graph
+./build/codegraph test-mcp
 ./build/codegraph --version
 ./build/codegraph doctor-deps
 ./build/codegraph parse-smoke testing/sample.cpp
@@ -420,13 +472,12 @@ cmake --build build
 
 ## Next milestone
 
-Step 9: MCP server.
+Acceptance cleanup / doctor polish.
 
 Scope from the spec:
 
-- Add stdio JSON-RPC server.
-- Keep protocol responses on stdout only.
-- Send logs to stderr or `.codegraph/logs/mcp.log`.
-- Implement the agent-facing read/query tools from §10 over the existing CLI/read/materializer functionality.
+- Fill any remaining §12 acceptance gaps.
+- Tighten doctor output around runtime dependencies and repository state.
+- Keep MCP stdio behavior stable while adding polish.
 
-Do not implement doctor/acceptance cleanup beyond what is needed for MCP.
+Do not add new language frontends yet.

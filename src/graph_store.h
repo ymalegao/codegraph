@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -10,11 +11,30 @@
 
 namespace codegraph {
 
+struct FileData {
+    StringId path;
+    StringId content_hash;
+};
+
+struct GraphSymbolView {
+    NodeId node_id = NodeId::Invalid;
+    FileId file = FileId{};
+    SymbolKind kind = SymbolKind::Other;
+    std::string_view name;
+    std::string_view qualified_name;
+    std::string_view signature;
+    std::string_view path;
+    std::string_view file_content_hash;
+    SourceSpan span{};
+};
+
 struct GraphIndex {
     Graph graph;
     StringInterner interner;
+    std::vector<FileData> files;
     std::vector<std::pair<uint64_t, NodeId>> symbol_by_namehash;
     std::vector<std::pair<StringId, FileId>> file_by_path;
+    std::vector<std::pair<StringId, NodeId>> file_node_by_path;
 };
 
 GraphIndex build_graph_index(Storage& storage);
@@ -37,6 +57,21 @@ uint32_t graph_memory_count_for_node(
 std::vector<NodeId> graph_symbols_by_name_hash(
     const GraphIndex& index,
     std::string_view name
+);
+
+std::optional<GraphSymbolView> graph_symbol(
+    const GraphIndex& index,
+    NodeId node
+);
+
+std::optional<FileData> graph_file(
+    const GraphIndex& index,
+    FileId file
+);
+
+std::optional<NodeId> graph_file_node_by_path(
+    const GraphIndex& index,
+    std::string_view path
 );
 
 }  // namespace codegraph

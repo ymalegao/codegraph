@@ -123,6 +123,7 @@ target_link_libraries(codegraph_graph_store PUBLIC
   codegraph_sanitizers
   codegraph_core
   codegraph_hash
+  codegraph_source_projection
   codegraph_storage
 )
 
@@ -322,6 +323,32 @@ target_compile_options(codegraph_memory_reads PRIVATE
   -Wpedantic
 )
 
+add_library(codegraph_mcp_server
+  src/mcp_server.cpp
+)
+
+target_include_directories(codegraph_mcp_server PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(codegraph_mcp_server PUBLIC
+  codegraph_sanitizers
+  codegraph_frontend
+  codegraph_graph_store
+  codegraph_hash
+  codegraph_materializer
+  codegraph_memory_reads
+  codegraph_read_tools
+  codegraph_storage
+  nlohmann_json::nlohmann_json
+)
+
+target_compile_options(codegraph_mcp_server PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+
 add_executable(codegraph
   src/main.cpp
 )
@@ -334,6 +361,7 @@ target_link_libraries(codegraph PRIVATE
   codegraph_hash
   codegraph_indexer
   codegraph_materializer
+  codegraph_mcp_server
   codegraph_memory_reads
   codegraph_read_tools
   codegraph_resolver

@@ -118,6 +118,10 @@ GraphIndex build_graph_index(Storage& storage) {
             0,
         };
 
+        if (kind == NodeKind::File) {
+            index.file_node_by_path.push_back({index.graph.nodes[node_id].title, static_cast<NodeId>(node_id)});
+        }
+
         if (kind == NodeKind::Symbol) {
             SymbolStableIdParts parts;
             if (parse_symbol_stable_id(column_text(nodes_stmt.get(), 1), parts)) {
@@ -127,16 +131,32 @@ GraphIndex build_graph_index(Storage& storage) {
             }
         }
     }
+    std::sort(index.file_node_by_path.begin(), index.file_node_by_path.end());
+
+    const uint32_t max_file_id = checked_u32(
+        storage.query_int("SELECT COALESCE(MAX(file_id), 0) FROM files;"),
+        "file_id"
+    );
+    const StringId empty_id = index.interner.intern("");
+    index.files.assign(
+        static_cast<size_t>(max_file_id) + 1U,
+        FileData{empty_id, empty_id}
+    );
 
     Statement file_stmt(
         storage.handle(),
-        "SELECT file_id, path FROM files ORDER BY path;"
+        "SELECT file_id, path, content_hash FROM files ORDER BY path;"
     );
     while (file_stmt.step()) {
         const auto file_id = static_cast<FileId>(
             checked_u32(sqlite3_column_int64(file_stmt.get(), 0), "file_id")
         );
         const StringId path = index.interner.intern(column_text(file_stmt.get(), 1));
+        const StringId content_hash = index.interner.intern(column_text(file_stmt.get(), 2));
+        const uint32_t file_index = to_u32(file_id);
+        if (file_index < index.files.size()) {
+            index.files[file_index] = FileData{path, content_hash};
+        }
         index.file_by_path.push_back({path, file_id});
     }
     std::sort(index.file_by_path.begin(), index.file_by_path.end());
@@ -328,6 +348,67 @@ std::vector<NodeId> graph_symbols_by_name_hash(
     }
     sort_unique_nodes(result);
     return result;
+}
+
+std::optional<GraphSymbolView> graph_symbol(
+    const GraphIndex& index,
+    NodeId node_id
+) {
+    const uint32_t node_index = to_u32(node_id);
+    if (node_index >= index.graph.nodes.size()) {
+        return std::nullopt;
+    }
+
+    const Node& node = index.graph.nodes[node_index];
+    if (node.kind != NodeKind::Symbol || node.status != Status::Active ||
+        node.payload >= index.graph.symbols.size()) {
+        return std::nullopt;
+    }
+
+    const SymbolData& symbol = index.graph.symbols[node.payload];
+    const auto file = graph_file(index, symbol.file);
+    if (!file.has_value()) {
+        return std::nullopt;
+    }
+
+    return GraphSymbolView{
+        node_id,
+        symbol.file,
+        symbol.sym_kind,
+        index.interner.view(symbol.name),
+        index.interner.view(symbol.qualified_name),
+        index.interner.view(symbol.signature),
+        index.interner.view(file->path),
+        index.interner.view(file->content_hash),
+        symbol.span,
+    };
+}
+
+std::optional<FileData> graph_file(
+    const GraphIndex& index,
+    FileId file
+) {
+    const uint32_t file_index = to_u32(file);
+    if (file_index >= index.files.size()) {
+        return std::nullopt;
+    }
+    const FileData& data = index.files[file_index];
+    if (index.interner.view(data.path).empty()) {
+        return std::nullopt;
+    }
+    return data;
+}
+
+std::optional<NodeId> graph_file_node_by_path(
+    const GraphIndex& index,
+    std::string_view path
+) {
+    for (const auto& [path_id, node] : index.file_node_by_path) {
+        if (index.interner.view(path_id) == path) {
+            return node;
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace codegraph

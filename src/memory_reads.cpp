@@ -106,6 +106,32 @@ void add_direct_affects(Storage& storage, int64_t target_node, MemoryReadResult&
     }
 }
 
+void add_graph_memory_nodes(
+    Storage& storage,
+    const std::vector<NodeId>& memory_nodes,
+    MemoryReadResult& result
+) {
+    Statement stmt(
+        storage.handle(),
+        "SELECT m.memory_id, m.node_id, m.memory_type, m.title, m.body, m.created_at, "
+        "'' "
+        "FROM memories m "
+        "JOIN nodes n ON n.node_id = m.node_id "
+        "WHERE m.node_id = ? AND n.status = ?;"
+    );
+
+    for (NodeId node : memory_nodes) {
+        stmt.reset();
+        bind_int64(stmt.get(), 1, to_u32(node));
+        bind_text(stmt.get(), 2, status_text(Status::Active));
+        while (stmt.step()) {
+            MemoryView memory = memory_from_statement(stmt.get(), 6);
+            memory.provenance = "direct affects edge";
+            add_memory(result, std::move(memory));
+        }
+    }
+}
+
 void add_matching_path_rules(Storage& storage, std::string_view path, MemoryReadResult& result) {
     Statement stmt(
         storage.handle(),
@@ -151,6 +177,20 @@ MemoryReadResult memory_for_target(Storage& storage, std::string_view target) {
 
     add_direct_affects(storage, resolve_reference(storage, target), result);
     add_matching_path_rules(storage, file_part_for_target(target), result);
+    return result;
+}
+
+MemoryReadResult memory_for_graph_nodes(
+    Storage& storage,
+    std::string_view target,
+    const std::vector<NodeId>& memory_nodes,
+    std::string_view path_for_rules
+) {
+    MemoryReadResult result;
+    result.target = std::string(target);
+
+    add_graph_memory_nodes(storage, memory_nodes, result);
+    add_matching_path_rules(storage, path_for_rules, result);
     return result;
 }
 

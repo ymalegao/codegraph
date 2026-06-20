@@ -454,7 +454,7 @@ Never return cached span content when the file hash has changed. Re-resolve and 
 Protocol messages on **stdout only**; all logging to stderr / `.codegraph/logs/mcp.log`.
 
 ```
-find_symbol(name, kind?)
+find_symbol(name, limit=20)
     -> [ { qualified_name, file, start_line, end_line, symbol_id } ]   # exact, top few
 
 search_symbol(query, kind?, limit=20)
@@ -523,7 +523,7 @@ Each step has a done-criterion. Do them in order.
 6. **Op log + materializer** (§6, §7: `ADD_CORRECTION`, `ADD_DECISION`, resolution, pending edges). *Done:* `correct`/`remember` append ops; `materialize` builds rows; running it twice makes no duplicates; a correction affecting a not-yet-indexed path lands pending, then resolves after `scan`.
 7. **Memory reads** (§10 `get_memory_for_*` via reverse edges). *Done:* after a correction on `resdb/**`, `memory-for resdb/app/x.cc` shows it with reason; `bftsmart/**` shows the avoid rule.
 8. **CSR + sorted indexes** (§5). *Done:* `bench` meets §14 targets.
-9. **MCP server** (§10 stdio JSON-RPC). *Done:* a JSON-RPC script drives `find_symbol`, `read_symbol`, `get_memory_for_file`, `record_correction` correctly.
+9. **MCP server** (§10 stdio JSON-RPC). *Done:* a JSON-RPC script drives `find_symbol`, `read_symbol`, `read_enclosing_symbol`, `get_memory_for_file`, `search_symbol`, and `record_correction` correctly.
 10. **doctor + bench + acceptance tests** (§13). *Done:* all §13 tests green.
 
 ---

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "core.h"
 #include "storage.h"
 
 namespace codegraph {
@@ -32,5 +33,12 @@ struct MemoryReadResult {
 };
 
 MemoryReadResult memory_for_target(Storage& storage, std::string_view target);
+
+MemoryReadResult memory_for_graph_nodes(
+    Storage& storage,
+    std::string_view target,
+    const std::vector<NodeId>& memory_nodes,
+    std::string_view path_for_rules
+);
 
 }  // namespace codegraph

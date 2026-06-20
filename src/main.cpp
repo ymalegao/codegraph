@@ -19,6 +19,7 @@
 #include "indexer.h"
 #include "materializer.h"
 #include "memory_reads.h"
+#include "mcp_server.h"
 #include "read_tools.h"
 #include "resolver.h"
 #include "scanner.h"
@@ -1741,6 +1742,137 @@ int command_test_graph() {
     return 0;
 }
 
+int command_test_mcp() {
+    const std::filesystem::path repo_root = std::filesystem::current_path();
+    const std::filesystem::path exe_path = std::filesystem::read_symlink("/proc/self/exe");
+    const std::filesystem::path test_repo = repo_root / "build" / "codegraph-test-mcp-repo";
+    const std::filesystem::path fixture_dir = test_repo / "testing";
+    const std::filesystem::path fixture_file = fixture_dir / "codegraph_mcp_target.cpp";
+    const std::filesystem::path codegraph_dir = test_repo / ".codegraph";
+    const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
+    const std::filesystem::path script_path = test_repo / "mcp-script.jsonl";
+    const std::filesystem::path stdout_path = test_repo / "mcp-stdout.jsonl";
+    const std::filesystem::path stderr_path = test_repo / "mcp-stderr.log";
+
+    std::error_code ignored;
+    std::filesystem::remove_all(test_repo, ignored);
+    RemoveTreeOnExit remove_test_repo{test_repo};
+    std::filesystem::create_directories(fixture_dir);
+    std::filesystem::create_directories(codegraph_dir);
+
+    write_file(
+        fixture_file,
+        "namespace mcpstep {\n"
+        "int target() {\n"
+        "    return 9;\n"
+        "}\n"
+        "}\n"
+    );
+
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    {
+        codegraph::Storage storage(db_path);
+        storage.initialize_schema();
+        (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{test_repo});
+        (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{test_repo});
+        (void)codegraph::append_correction_op(
+            codegraph_dir,
+            codegraph::CorrectionInput{
+                "Initial MCP correction",
+                "Initial MCP memory",
+                {"testing/**"},
+                {},
+                {"testing/codegraph_mcp_target.cpp::mcpstep::target"},
+            }
+        );
+        (void)codegraph::materialize(storage, codegraph_dir);
+    }
+
+    {
+        std::ofstream script(script_path);
+        script << R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})" << "\n";
+        script << R"({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_symbol","arguments":{"name":"mcpstep::target","limit":5}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_symbol","arguments":{"query":"mcpstep::target","include_memory":true}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_memory_for_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_symbol","arguments":{"query":"target:* -(","kind":"function","limit":10}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"read_enclosing_symbol","arguments":{"path":"testing/codegraph_mcp_target.cpp","line":2}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"record_correction","arguments":{"reason":"MCP correction reason","affects":["testing/codegraph_mcp_target.cpp"],"prefer_paths":["testing/**"]}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_memory_for_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
+    }
+
+    const std::string command =
+        "cd " + shell_quote(test_repo.string()) + " && " +
+        shell_quote(exe_path.string()) + " mcp < " + shell_quote(script_path.string()) +
+        " > " + shell_quote(stdout_path.string()) +
+        " 2> " + shell_quote(stderr_path.string());
+    const int rc = std::system(command.c_str());
+    require(rc == 0, "codegraph mcp subprocess failed");
+
+    std::ifstream stdout_file(stdout_path);
+    require(static_cast<bool>(stdout_file), "mcp stdout file was not created");
+    std::vector<nlohmann::json> responses;
+    std::string line;
+    while (std::getline(stdout_file, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        responses.push_back(nlohmann::json::parse(line));
+    }
+    require(responses.size() == 9U, "mcp stdout did not contain expected JSON-RPC responses only");
+
+    auto response_by_id = [&](int id) -> nlohmann::json {
+        for (const nlohmann::json& response : responses) {
+            if (response.value("id", -1) == id) {
+                return response;
+            }
+        }
+        throw std::runtime_error("missing MCP response id " + std::to_string(id));
+    };
+    auto tool_text = [&](int id) -> nlohmann::json {
+        const nlohmann::json response = response_by_id(id);
+        require(!response.contains("error"), "mcp tool response had protocol error");
+        const std::string text = response["result"]["content"][0]["text"].get<std::string>();
+        return nlohmann::json::parse(text);
+    };
+
+    require(response_by_id(1)["result"]["capabilities"].contains("tools"), "mcp initialize missing tools");
+    require(response_by_id(2)["result"]["tools"].size() >= 8U, "mcp tools/list returned too few tools");
+    require(!tool_text(3).empty(), "mcp find_symbol returned no graph matches");
+
+    const nlohmann::json read = tool_text(4);
+    require(read["hash_status"] == "ok", "mcp read_symbol did not use verified fast path");
+    require(read["body"].get<std::string>().find("return 9") != std::string::npos,
+            "mcp read_symbol returned wrong body");
+    require(!read["memory"]["corrections"].empty(), "mcp read_symbol did not bundle memory");
+
+    require(!tool_text(5)["corrections"].empty(), "mcp get_memory_for_file returned no memory");
+    require(!tool_text(6).empty(), "mcp search_symbol returned no FTS matches");
+    require(
+        tool_text(7)["qualified_name"] == "mcpstep::target",
+        "mcp read_enclosing_symbol returned wrong symbol"
+    );
+
+    const nlohmann::json recorded = tool_text(8);
+    require(recorded["node_id"].get<int64_t>() > 0, "mcp record_correction did not return node_id");
+
+    const nlohmann::json followup = tool_text(9);
+    bool saw_recorded = false;
+    for (const nlohmann::json& correction : followup["corrections"]) {
+        if (correction.value("body", "") == "MCP correction reason") {
+            saw_recorded = true;
+        }
+    }
+    require(saw_recorded, "mcp graph was not rebuilt after record_correction");
+
+    std::cout << "mcp jsonrpc: ok\n";
+    std::cout << "mcp tools: ok\n";
+    std::cout << "mcp graph reads: ok\n";
+    std::cout << "mcp search/write: ok\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr
         << "usage:\n"
@@ -1748,6 +1880,7 @@ void print_usage() {
         << "  codegraph doctor-deps\n"
         << "  codegraph scan\n"
         << "  codegraph index\n"
+        << "  codegraph mcp\n"
         << "  codegraph find-symbol <name>\n"
         << "  codegraph search-symbol <query> [--kind K] [--limit N]\n"
         << "  codegraph read-symbol <name>\n"
@@ -1765,7 +1898,8 @@ void print_usage() {
         << "  codegraph test-read\n"
         << "  codegraph test-materialize\n"
         << "  codegraph test-memory\n"
-        << "  codegraph test-graph\n";
+        << "  codegraph test-graph\n"
+        << "  codegraph test-mcp\n";
 }
 
 
@@ -1787,6 +1921,21 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "index") == 0) {
             return command_index();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "mcp") == 0) {
+            const std::filesystem::path repo_root = std::filesystem::current_path();
+            const std::filesystem::path db_path = repo_root / ".codegraph" / "graph.sqlite";
+            const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+            codegraph::Storage storage(db_path);
+            storage.initialize_schema();
+            codegraph::FrontendRegistry registry = make_frontend_registry();
+            return codegraph::run_mcp_server(
+                storage,
+                registry,
+                codegraph::IndexOptions{repo_root},
+                codegraph_dir
+            );
         }
 
         if (argc == 3 && std::strcmp(argv[1], "find-symbol") == 0) {
@@ -1875,6 +2024,10 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::strcmp(argv[1], "test-graph") == 0) {
             return command_test_graph();
+        }
+
+        if (argc == 2 && std::strcmp(argv[1], "test-mcp") == 0) {
+            return command_test_mcp();
         }
 
         print_usage();
