@@ -1,0 +1,10 @@
+repo_id: codegraph
+ignore:
+  - .git/**
+  - build/**
+  - cmake-build-*/**
+  - node_modules/**
+  - **/__pycache__/**
+  - third_party/**
+  - generated/**
+max_file_size_mb: 10
