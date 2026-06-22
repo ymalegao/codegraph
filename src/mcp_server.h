@@ -8,6 +8,13 @@
 
 namespace codegraph {
 
+
+struct AffectedNodeView {
+    NodeId node_id;
+    std::string kind;
+    std::string title;
+};
+
 int run_mcp_server(
     Storage& storage,
     FrontendRegistry& registry,

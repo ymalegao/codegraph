@@ -4,3 +4,4 @@ build/
 testing/helloworld
 .codegraph/*
 !.codegraph/ops/
+build-ninja/

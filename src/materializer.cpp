@@ -350,6 +350,23 @@ void apply_decision(Storage& storage, const Operation& op) {
     }
 }
 
+void apply_handoff(Storage& storage, const Operation& op) {
+    const std::string title = op.payload.value("title", "Handoff");
+    const std::string body = op.payload.value("body", "");
+    const int64_t node_id = upsert_memory_node(
+        storage,
+        memory_stable_id(op),
+        node_kind_text(NodeKind::Handoff),
+        title,
+        op.created_at
+    );
+    insert_memory(storage, node_id, memory_type_text(MemoryType::Handoff), title, body, op.created_at);
+
+    for (const std::string& ref : json_string_array(op.payload, "affects")) {
+        insert_affects_edge(storage, node_id, ref);
+    }
+}
+
 void apply_operation(Storage& storage, const Operation& op) {
     if (op.op_type == "ADD_CORRECTION") {
         apply_correction(storage, op);
@@ -357,6 +374,10 @@ void apply_operation(Storage& storage, const Operation& op) {
     }
     if (op.op_type == "ADD_DECISION") {
         apply_decision(storage, op);
+        return;
+    }
+    if (op.op_type == "ADD_HANDOFF") {
+        apply_handoff(storage, op);
         return;
     }
     throw std::runtime_error("unknown op type: " + op.op_type);
@@ -403,6 +424,19 @@ std::string append_decision_op(
         {"affects", input.affects},
     };
     return append_op(codegraph_dir, "ADD_DECISION", payload);
+}
+
+
+std::string append_handoff_op(
+    const std::filesystem::path& codegraph_dir,
+    const HandoffInput& input
+){
+    const json payload{
+        {"title", input.title},
+        {"body", input.body},
+        {"affects", input.affects},
+    };
+    return append_op(codegraph_dir, "ADD_HANDOFF", payload);
 }
 
 MaterializeResult materialize(

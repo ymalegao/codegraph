@@ -23,6 +23,7 @@ NodeKind node_kind_from_string(std::string_view kind) {
     if (kind == KindText::Symbol) return NodeKind::Symbol;
     if (kind == KindText::Correction) return NodeKind::Correction;
     if (kind == KindText::ArchDecision) return NodeKind::ArchDecision;
+    if (kind == KindText::Handoff) return NodeKind::Handoff;
     throw std::runtime_error("unknown node kind: " + std::string(kind));
 }
 
@@ -54,6 +55,7 @@ Status status_from_string(std::string_view status) {
 MemoryType memory_type_from_string(std::string_view type) {
     if (type == KindText::Correction) return MemoryType::Correction;
     if (type == KindText::ArchDecision) return MemoryType::ArchDecision;
+    if (type == KindText::Handoff) return MemoryType::Handoff;
     return MemoryType::Unknown;
 }
 

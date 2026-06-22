@@ -424,6 +424,7 @@ int64_t node_id_for_memory_op(Storage& storage, std::string_view op_id) {
     return sqlite3_column_int64(stmt.get(), 0);
 }
 
+
 json record_correction_json(McpContext& ctx, const json& args) {
     CorrectionInput input;
     input.title = args.value("title", "Correction");
@@ -492,6 +493,73 @@ json string_schema(std::string description = {}) {
 json uint_schema(uint32_t fallback) {
     return {{"type", "integer"}, {"minimum", 0}, {"default", fallback}};
 }
+
+
+json write_handoff_schema() {
+    return schema_object({
+        {"title", string_schema("The title of the handoff")},
+        {"body", string_schema("The body of the handoff")},
+        {"affects", {{"type", "array"}, {"items", string_schema()}}},
+    });
+}
+
+
+json resume_from_handoff_schema() {
+    return schema_object({});
+}
+
+
+json write_handoff(McpContext& ctx, const json& args) {
+    HandoffInput input{
+        args.value("title", "Handoff"),
+        required_string(args, "body"),
+        optional_string_array(args, "affects"),
+    };
+
+    std::filesystem::create_directories(ctx.codegraph_dir);
+    const std::string op_id = append_handoff_op(ctx.codegraph_dir, input);
+    const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
+    const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
+
+    ctx.graph = build_graph_index(ctx.storage);
+    ctx.data_version = sqlite_data_version(ctx.storage);
+
+    return {
+        {"op_id", op_id},
+        {"node_id", node_id},
+        {"ops_applied", materialized.ops_applied},
+        {"edges_resolved", materialized.edges_resolved},
+    };
+
+
+
+}
+
+
+
+json resume_from_handoff(McpContext& ctx, const json& args) {
+  
+    
+    ResumeContext context  = build_resume_context(ctx.storage, ctx.graph);
+    std::vector<AffectedNodeView> affected_nodes;
+
+    json affected = json::array();
+    for (const AffectedNodeView& node : context.affected_nodes) {
+        affected.push_back({
+            {"node_id", to_u32(node.node_id)},
+            {"kind", node.kind},
+            {"title", node.title},
+            {"path", node.path},
+            {"qualified_name", node.qualified_name},
+        });
+    }
+
+    return {
+        {"handoff", context.handoff_body},
+        {"affected_nodes", affected_nodes},
+    };
+}
+
 
 std::vector<ToolDefinition> tool_registry() {
     return {
@@ -570,6 +638,18 @@ std::vector<ToolDefinition> tool_registry() {
             }),
             record_decision_json,
         },
+       ToolDefinition{
+            "write_handoff",
+            "Append and materialize a handoff memory, then rebuild the graph.",
+            write_handoff_schema(),
+            write_handoff,
+        },
+        ToolDefinition{
+            "resume_from_handoff",
+            "Resume the session from the latest handoff.",
+            resume_from_handoff_schema(),
+            resume_from_handoff,
+        }
     };
 }
 
@@ -628,7 +708,12 @@ bool read_tool_name(std::string_view name) {
            name == "read_file_range" ||
            name == "get_memory_for_file" ||
            name == "get_memory_for_symbol" ||
-           name == "search_symbol";
+           name == "search_symbol" ||
+           name == "record_correction" ||
+           name == "record_decision" ||
+           name == "write_handoff" ||
+           name == "resume_from_handoff";
+
 }
 
 void rebuild_graph_if_external_change(McpContext& ctx) {
@@ -703,6 +788,10 @@ std::optional<json> handle_request(
     return std::nullopt;
 }
 
+
+
+
+
 }  // namespace
 
 int run_mcp_server(
@@ -747,5 +836,7 @@ int run_mcp_server(
     log_line(ctx, "codegraph mcp stopped");
     return 0;
 }
+
+
 
 }  // namespace codegraph

@@ -12,7 +12,7 @@ enum class NodeId : uint32_t { Invalid = 0xFFFFFFFFu };
 enum class FileId : uint32_t {};
 enum class StringId : uint32_t {};
 
-enum class NodeKind : uint8_t { File, Symbol, Correction, ArchDecision };
+enum class NodeKind : uint8_t { File, Symbol, Correction, ArchDecision, Handoff };
 enum class SymbolKind : uint8_t {
     Function,
     Method,
@@ -25,7 +25,7 @@ enum class SymbolKind : uint8_t {
 };
 enum class EdgeKind : uint8_t { Contains, Imports, Affects };
 enum class Status : uint8_t { Active, Tombstoned, Stale };
-enum class MemoryType : uint8_t { Correction = 0, ArchDecision = 1, Unknown = 255 };
+enum class MemoryType : uint8_t { Correction = 0, ArchDecision = 1, Handoff = 2, Unknown = 255 };
 
 namespace KindText {
 inline constexpr std::string_view File = "file";
@@ -46,6 +46,7 @@ inline constexpr std::string_view Affects = "affects";
 inline constexpr std::string_view Active = "active";
 inline constexpr std::string_view Tombstoned = "tombstoned";
 inline constexpr std::string_view Stale = "stale";
+inline constexpr std::string_view Handoff = "handoff";
 }  // namespace KindText
 
 constexpr std::string_view node_kind_text(NodeKind kind) {
@@ -54,6 +55,7 @@ constexpr std::string_view node_kind_text(NodeKind kind) {
         case NodeKind::Symbol: return KindText::Symbol;
         case NodeKind::Correction: return KindText::Correction;
         case NodeKind::ArchDecision: return KindText::ArchDecision;
+        case NodeKind::Handoff: return KindText::Handoff;
     }
     return KindText::File;
 }
@@ -94,6 +96,7 @@ constexpr std::string_view memory_type_text(MemoryType type) {
     switch (type) {
         case MemoryType::Correction: return KindText::Correction;
         case MemoryType::ArchDecision: return KindText::ArchDecision;
+        case MemoryType::Handoff: return KindText::Handoff;
         case MemoryType::Unknown: return KindText::Other;
     }
     return KindText::Other;

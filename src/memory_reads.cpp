@@ -8,6 +8,7 @@
 #include "core.h"
 #include "resolver.h"
 #include "sqlite_util.h"
+#include "graph_store.h"
 
 namespace codegraph {
 namespace {
@@ -192,6 +193,42 @@ MemoryReadResult memory_for_graph_nodes(
     add_graph_memory_nodes(storage, memory_nodes, result);
     add_matching_path_rules(storage, path_for_rules, result);
     return result;
+}
+
+
+std::vector<MemoryView> latest_handoffs(Storage& storage, uint32_t limit) {
+    std::vector<MemoryView> handoffs;
+    Statement stmt(
+        storage.handle(),
+        "SELECT m.memory_id, m.node_id, m.memory_type, m.title, m.body, m.created_at, "
+        "       'latest handoff' "
+        "FROM memories m "
+        "JOIN nodes n ON n.node_id = m.node_id "
+        "WHERE m.memory_type = 'handoff' "
+        "  AND n.status = 'active' "
+        "ORDER BY m.created_at DESC, m.memory_id DESC "
+        "LIMIT ?;"
+    );
+    bind_int64(stmt.get(), 1, static_cast<int64_t>(limit));
+
+    while (stmt.step()) {
+        handoffs.push_back(memory_from_statement(stmt.get(), 6));
+    }
+    return handoffs;
+}
+
+
+ResumeContext build_resume_context(Storage& storage, const GraphIndex& graph) {
+   MemoryView handoff = latest_handoffs(storage, 1).front();
+   NodeId handoff_node = static_cast<NodeId>(handoff.node_id);
+   std::vector<NodeId> affected = csr_neighbors(graph.graph.forward, handoff_node, EdgeKind::Affects);
+
+    ResumeContext context;
+    context.handoff_body = handoff.body;
+    context.affected_nodes = affected;
+    return context;
+
+
 }
 
 }  // namespace codegraph

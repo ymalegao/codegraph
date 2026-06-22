@@ -9,6 +9,8 @@
 
 namespace codegraph {
 
+struct GraphIndex;
+
 struct PathRuleView {
     std::string rule_kind;
     std::string pattern;
@@ -31,6 +33,16 @@ struct MemoryReadResult {
     std::vector<MemoryView> corrections;
     std::vector<MemoryView> decisions;
 };
+
+
+struct ResumeContext {
+    std::string handoff_body;
+    std::vector<NodeId> affected_nodes;
+};
+
+std::vector<MemoryView> latest_handoffs(Storage& storage, uint32_t limit);
+
+ResumeContext build_resume_context(Storage& storage, const GraphIndex& graph);
 
 MemoryReadResult memory_for_target(Storage& storage, std::string_view target);
 

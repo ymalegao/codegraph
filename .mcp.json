@@ -4,7 +4,8 @@
       "type": "stdio",
       "command": "./build/codegraph",
       "args": [
-        "mcp"
+        "mcp",
+        "."
       ],
       "env": {}
     }

@@ -28,6 +28,13 @@ struct MaterializeResult {
     uint32_t edges_resolved = 0;
 };
 
+
+struct HandoffInput{
+    std::string title;
+    std::string body;
+    std::vector<std::string> affects;
+};
+
 std::string ensure_device_id(const std::filesystem::path& codegraph_dir);
 std::string append_correction_op(
     const std::filesystem::path& codegraph_dir,
@@ -36,6 +43,11 @@ std::string append_correction_op(
 std::string append_decision_op(
     const std::filesystem::path& codegraph_dir,
     const DecisionInput& input
+);
+
+std::string append_handoff_op(
+    const std::filesystem::path& codegraph_dir,
+    const HandoffInput& input
 );
 
 MaterializeResult materialize(
