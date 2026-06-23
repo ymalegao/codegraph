@@ -411,4 +411,25 @@ std::optional<NodeId> graph_file_node_by_path(
     return std::nullopt;
 }
 
+std::vector<std::pair<NodeId, NodeId>> graph_symbols_in_file(
+    const GraphIndex& index,
+    NodeId file_node
+) {
+    std::vector<std::pair<NodeId, NodeId>> result;
+    std::vector<std::pair<NodeId, NodeId>> stack;  // (node, parent)
+    for (NodeId child : csr_neighbors(index.graph.forward, file_node, EdgeKind::Contains)) {
+        stack.emplace_back(child, file_node);
+    }
+    while (!stack.empty()) {
+        const auto [node, parent] = stack.back();
+        stack.pop_back();
+
+        for (NodeId child : csr_neighbors(index.graph.forward, node, EdgeKind::Contains)) {
+            stack.emplace_back(child, node);
+        }
+        result.emplace_back(node, parent);
+    }
+    return result;
+}
+
 }  // namespace codegraph

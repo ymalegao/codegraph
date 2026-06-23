@@ -556,6 +556,48 @@ Step 11 intentionally does not add:
 - CI integration
 - background daemon
 
+### Step 12: list_symbols_in_file MCP tool (first v2 increment)
+
+Implemented in:
+
+- `src/graph_store.h`
+- `src/graph_store.cpp`
+- `src/mcp_server.cpp`
+- `src/main.cpp`
+
+Added:
+
+- `graph_symbols_in_file(index, file_node)` in the graph layer.
+  - Recursive forward-`Contains` walk from a file node.
+  - Returns `{symbol_node, parent_node}` pairs for every symbol in the file.
+  - `parent_node` is the file node for top-level symbols, the enclosing symbol node otherwise.
+  - Peer to `graph_symbols_by_name_hash`; keeps traversal in the graph layer.
+- MCP tool `list_symbols_in_file`.
+  - Args: `{ "path": string }`.
+  - Resolves the file node, calls `graph_symbols_in_file`, serializes each via
+    `symbol_json`, attaches `parent_node_id`, and sorts by `start_line`.
+  - Returns `{ path, file_node_id, count, symbols[] }` (flat, recursive).
+  - Registered in `tool_registry()` and added to `read_tool_name()` so the
+    external-change graph rebuild fires before it runs.
+- Test coverage added to `test-mcp` (response id 11).
+  - Asserts the nested `mcpstep::target` is returned (a flat top-level walk
+    would drop it), proving recursion.
+  - Asserts its `parent_node_id` equals the `mcpstep` namespace node, not the
+    file node, proving parent tracking.
+  - Asserts `start_line` ordering.
+
+Known caveat:
+
+- Anonymous-namespace / file-local symbols are not yet extracted, so they are
+  absent from the listing. This is an upstream extraction gap (the in-tree
+  `cpp_frontend.cpp` work targets it), not a defect in this tool.
+
+Not changed (deliberately):
+
+- `enclosing_symbol` remains inline in `mcp_server.cpp`. It is now the only
+  Contains-traversal not living in `graph_store`; consolidating it is a clean
+  future cleanup, left out to keep this change surgical.
+
 ## Verification commands
 
 Run from the repo root:
@@ -581,13 +623,63 @@ cmake --build build
 ./build/codegraph parse-smoke testing/sample.py
 ```
 
-## Next milestone
+## Next milestone: v2
 
-Post-acceptance polish.
+Thesis from dogfooding the MCP tools: CodeGraph is currently "nice to have."
+To become "need to have" for agents, three things must hold, in order:
 
-Scope from the spec:
+1. **Trust / completeness (precondition).** An empty result must mean "does not
+   exist," not "extraction missed it." Until then, agents double-check with `rg`
+   and the tool is redundant. Requires closing extraction gaps AND making tools
+   report unindexed paths/languages explicitly instead of silent-empty.
+   - Evidence: `find_symbol("tool_registry")` returned empty because it lives in
+     an anonymous namespace (extraction gap), indistinguishable from "absent."
+2. **Discovery by intent (entry point).** `search_symbol` indexes only
+   names+signatures with whole-token matching, so intent queries
+   ("register mcp tool", "tools list dispatch") return empty. Agents navigate by
+   intent, so this must work for CodeGraph to be the first call, not the second.
+3. **Accumulated memory (the moat).** Corrections/decisions attached to symbols,
+   surfaced at edit time, are the one thing `rg`/LSP cannot do and the only part
+   that compounds with use.
 
-- Improve UX and packaging around installing/running CodeGraph in other repositories.
-- Keep MCP stdio behavior stable while adding polish.
+### v2 work, sequenced
+
+- **A. Trust (precondition).**
+  - Land the in-tree `cpp_frontend.cpp` anonymous-namespace extraction fix
+    (build + reindex). This also un-hides symbols from `list_symbols_in_file`.
+  - Coverage honesty: tools report when a path/language is not indexed instead
+    of returning empty.
+  - Fix `doctor`'s `handoff`-node vocabulary (currently fails `nodes_bad_kind`
+    on the live DB).
+- **B. Intent discovery + memory moat (shared FTS infra, build together).**
+  - Source-text FTS search returning verified ranges.
+  - `find_prior_incidents`: FTS over correction/decision bodies with provenance.
+  - Same `fts_*` + trigger pattern as existing FTS tables.
+- **C. Benchmark harness (do before the call/reference graph).**
+  - Tool-vs-no-tool: measure tokens + task success with vs without CodeGraph
+    over the existing tools (list/search/read/memory). First data point:
+    `list_symbols_in_file` (one call) vs `rg` + N reads.
+  - Rationale: the benchmark is the instrument that decides whether and *where*
+    the expensive Tier 2 work earns its cost. It is also the corpus that
+    surfaces "tree-sitter handed back wrong/missing references — precisely here."
+- **C. Intent discovery + memory moat (shared FTS infra, build together).**
+  - Source-text FTS search returning verified ranges.
+  - `find_prior_incidents`: FTS over correction/decision bodies with provenance.
+  - Same `fts_*` + trigger pattern as existing FTS tables.
+- **D. Reference/call graph (tiered, gated on the benchmark).**
+  - **Tier 1 (tree-sitter, syntactic).** Frontend emits `Calls`/`References`
+    edges. Edge schema carries a `resolution` field (`syntactic` | `resolved`)
+    from day one so Tier 2 is a data-quality upgrade, not a schema migration.
+  - Run the benchmark against Tier 1 to quantify wrong/missing references.
+  - **Tier 2 (clangd for C++, semantic).** Upgrade edges to `resolved` where a
+    `compile_commands.json` is available; degrade gracefully to Tier 1
+    `syntactic` edges when clangd or the compile DB is absent — the tool must
+    not break. CMake already gives this repo a compile DB via
+    `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so validate Tier 2 on CodeGraph's own
+    source first.
+  - Decoupled from Python: clangd Tier 2 does not wait for the Python frontend.
+    Pyright Tier 2 rides with the Python frontend whenever that lands.
+
+This sequence is the recommended ordering; revise as priorities shift.
 
 Do not add new language frontends yet.

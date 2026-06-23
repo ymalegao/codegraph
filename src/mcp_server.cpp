@@ -401,6 +401,36 @@ json read_enclosing_symbol_json(McpContext& ctx, const json& args) {
     return read_graph_symbol(ctx, *symbol);
 }
 
+json list_symbols_in_file_json(McpContext& ctx, const json& args) {
+    const std::string path = required_string(args, "path");
+    const auto file_node = graph_file_node_by_path(ctx.graph, path);
+    if (!file_node.has_value()) {
+        throw std::runtime_error("file not found in graph: " + path);
+    }
+
+    json symbols = json::array();
+    for (const auto& [node, parent] : graph_symbols_in_file(ctx.graph, *file_node)) {
+        const auto symbol = graph_symbol(ctx.graph, node);
+        if (!symbol.has_value()) {
+            continue;
+        }
+        json entry = symbol_json(*symbol);
+        entry["parent_node_id"] = to_u32(parent);
+        symbols.push_back(std::move(entry));
+    }
+
+    std::sort(symbols.begin(), symbols.end(), [](const json& a, const json& b) {
+        return a.at("start_line").get<uint32_t>() < b.at("start_line").get<uint32_t>();
+    });
+
+    return {
+        {"path", path},
+        {"file_node_id", to_u32(*file_node)},
+        {"count", symbols.size()},
+        {"symbols", std::move(symbols)},
+    };
+}
+
 json get_memory_for_file_json(McpContext& ctx, const json& args) {
     const std::string path = required_string(args, "path");
     const auto node = graph_file_node_by_path(ctx.graph, path);
@@ -422,6 +452,25 @@ int64_t node_id_for_memory_op(Storage& storage, std::string_view op_id) {
     bind_text(stmt.get(), 1, stable_id);
     stmt.expect_row("select materialized memory node");
     return sqlite3_column_int64(stmt.get(), 0);
+}
+
+// affects references that did not resolve to an indexed node, so the caller
+// knows which targets are not tracked (e.g. a non-indexed file) instead of
+// inferring it from a counter.
+std::vector<std::string> unresolved_affects_for_node(Storage& storage, int64_t node_id) {
+    Statement stmt(
+        storage.handle(),
+        "SELECT to_ref FROM edges "
+        "WHERE from_node = ? AND kind = 'affects' AND resolved = 0 "
+        "AND to_ref IS NOT NULL AND to_ref != '' "
+        "ORDER BY to_ref;"
+    );
+    bind_int64(stmt.get(), 1, node_id);
+    std::vector<std::string> result;
+    while (stmt.step()) {
+        result.push_back(column_text(stmt.get(), 0));
+    }
+    return result;
 }
 
 
@@ -471,6 +520,8 @@ json write_memory(McpContext& ctx, const json& args, const MemoryKind& kind) {
     const std::string op_id = append_memory_op(ctx.codegraph_dir, kind, payload);
     const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
     const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
+    const std::vector<std::string> unresolved =
+        unresolved_affects_for_node(ctx.storage, node_id);
     ctx.graph = build_graph_index(ctx.storage);
     ctx.data_version = sqlite_data_version(ctx.storage);
     return {
@@ -478,6 +529,7 @@ json write_memory(McpContext& ctx, const json& args, const MemoryKind& kind) {
         {"node_id", node_id},
         {"ops_applied", materialized.ops_applied},
         {"edges_resolved", materialized.edges_resolved},
+        {"unresolved_affects", unresolved},
     };
 }
 
@@ -568,6 +620,12 @@ std::vector<ToolDefinition> tool_registry() {
             "Read the smallest symbol enclosing a file line.",
             schema_object({{"path", string_schema()}, {"line", uint_schema(0)}}),
             read_enclosing_symbol_json,
+        },
+        ToolDefinition{
+            "list_symbols_in_file",
+            "List every symbol defined in a file (recursive, flat, ordered by start line) from the in-memory graph.",
+            schema_object({{"path", string_schema()}}),
+            list_symbols_in_file_json,
         },
         ToolDefinition{
             "read_file_range",
@@ -676,6 +734,7 @@ bool read_tool_name(std::string_view name) {
     return name == "find_symbol" ||
            name == "read_symbol" ||
            name == "read_enclosing_symbol" ||
+           name == "list_symbols_in_file" ||
            name == "read_file_range" ||
            name == "get_memory_for_file" ||
            name == "get_memory_for_symbol" ||

@@ -74,4 +74,13 @@ std::optional<NodeId> graph_file_node_by_path(
     std::string_view path
 );
 
+// Recursive forward-Contains walk from a file node. Returns one
+// {symbol_node, parent_node} pair for every symbol contained in the file,
+// where parent_node is the file node for top-level symbols and the
+// enclosing symbol node otherwise.
+std::vector<std::pair<NodeId, NodeId>> graph_symbols_in_file(
+    const GraphIndex& index,
+    NodeId file_node
+);
+
 }  // namespace codegraph

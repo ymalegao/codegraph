@@ -2004,6 +2004,8 @@ int command_test_mcp() {
         script << R"({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"record_correction","arguments":{"reason":"MCP correction reason","affects":["testing/codegraph_mcp_target.cpp"],"prefer_paths":["testing/**"]}}})" << "\n";
         script << R"({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_memory_for_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
         script << R"({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"read_symbol","arguments":{"query":"mcpstep::target","include_memory":true}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"list_symbols_in_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"record_decision","arguments":{"title":"Untracked target decision","body":"affects a path that is not indexed","affects":["docs/UNTRACKED.md"]}}})" << "\n";
     }
 
     const std::string command =
@@ -2024,7 +2026,7 @@ int command_test_mcp() {
         }
         responses.push_back(nlohmann::json::parse(line));
     }
-    require(responses.size() == 10U, "mcp stdout did not contain expected JSON-RPC responses only");
+    require(responses.size() == 12U, "mcp stdout did not contain expected JSON-RPC responses only");
 
     auto response_by_id = [&](int id) -> nlohmann::json {
         for (const nlohmann::json& response : responses) {
@@ -2060,6 +2062,10 @@ int command_test_mcp() {
 
     const nlohmann::json recorded = tool_text(8);
     require(recorded["node_id"].get<int64_t>() > 0, "mcp record_correction did not return node_id");
+    // The affected file is indexed, so a write that fully resolves must report
+    // an empty unresolved_affects rather than leaving the caller to infer it.
+    require(recorded.contains("unresolved_affects") && recorded["unresolved_affects"].empty(),
+            "mcp record_correction with an indexed target reported unresolved affects");
 
     const nlohmann::json followup = tool_text(9);
     bool saw_recorded = false;
@@ -2070,6 +2076,41 @@ int command_test_mcp() {
     }
     require(saw_recorded, "mcp graph was not rebuilt after record_correction");
     require(!tool_text(10)["memory"]["corrections"].empty(), "mcp read_symbol did not bundle memory");
+
+    // list_symbols_in_file must recurse the hierarchical Contains edges: a flat
+    // top-level walk would return only the namespace and drop mcpstep::target,
+    // and parent tracking must point the nested function at its namespace, not
+    // the file. Both properties below fail loudly if that regresses.
+    const nlohmann::json listed = tool_text(11);
+    require(listed["path"] == "testing/codegraph_mcp_target.cpp",
+            "mcp list_symbols_in_file returned wrong path");
+    require(listed["symbols"].size() == 2U,
+            "mcp list_symbols_in_file did not return namespace + nested function");
+    require(listed["symbols"][0]["qualified_name"] == "mcpstep",
+            "mcp list_symbols_in_file not ordered by start line");
+    int64_t namespace_node = -1;
+    int64_t target_parent = -2;
+    bool saw_target = false;
+    for (const nlohmann::json& sym : listed["symbols"]) {
+        const std::string qualified = sym.value("qualified_name", "");
+        if (qualified == "mcpstep") {
+            namespace_node = sym["node_id"].get<int64_t>();
+        }
+        if (qualified == "mcpstep::target") {
+            saw_target = true;
+            target_parent = sym["parent_node_id"].get<int64_t>();
+        }
+    }
+    require(saw_target, "mcp list_symbols_in_file dropped the nested symbol");
+    require(target_parent == namespace_node,
+            "mcp list_symbols_in_file did not nest the symbol under its namespace");
+
+    // A write whose affects target is not an indexed node must surface that
+    // target explicitly (coverage honesty), not hide it behind a counter.
+    const nlohmann::json untracked = tool_text(12);
+    require(untracked["unresolved_affects"].size() == 1U &&
+                untracked["unresolved_affects"][0] == "docs/UNTRACKED.md",
+            "mcp record_decision did not report the unresolved affects target");
 
     std::cout << "mcp jsonrpc: ok\n";
     std::cout << "mcp tools: ok\n";
