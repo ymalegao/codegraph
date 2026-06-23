@@ -537,11 +537,10 @@ json write_handoff(McpContext& ctx, const json& args) {
 
 
 
-json resume_from_handoff(McpContext& ctx, const json& args) {
+json resume_from_handoff(McpContext& ctx, const json&) {
   
     
     ResumeContext context  = build_resume_context(ctx.storage, ctx.graph);
-    std::vector<AffectedNodeView> affected_nodes;
 
     json affected = json::array();
     for (const AffectedNodeView& node : context.affected_nodes) {
@@ -556,7 +555,9 @@ json resume_from_handoff(McpContext& ctx, const json& args) {
 
     return {
         {"handoff", context.handoff_body},
-        {"affected_nodes", affected_nodes},
+        {"affected_nodes", affected},
+        {"unresolved_affects", context.unresolved_affects},
+        {"found", context.found},
     };
 }
 

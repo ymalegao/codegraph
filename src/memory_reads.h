@@ -35,10 +35,22 @@ struct MemoryReadResult {
 };
 
 
+struct AffectedNodeView {
+    NodeId node_id = NodeId::Invalid;
+    std::string kind;
+    std::string title;
+    std::string path;
+    std::string qualified_name;
+};
+
 struct ResumeContext {
     std::string handoff_body;
-    std::vector<NodeId> affected_nodes;
+    std::vector<AffectedNodeView> affected_nodes;
+    std::vector<std::string>  unresolved_affects;
+    bool found = false;
 };
+
+
 
 std::vector<MemoryView> latest_handoffs(Storage& storage, uint32_t limit);
 

@@ -214,21 +214,54 @@ std::vector<MemoryView> latest_handoffs(Storage& storage, uint32_t limit) {
     while (stmt.step()) {
         handoffs.push_back(memory_from_statement(stmt.get(), 6));
     }
+
+
     return handoffs;
 }
 
 
 ResumeContext build_resume_context(Storage& storage, const GraphIndex& graph) {
-   MemoryView handoff = latest_handoffs(storage, 1).front();
-   NodeId handoff_node = static_cast<NodeId>(handoff.node_id);
-   std::vector<NodeId> affected = csr_neighbors(graph.graph.forward, handoff_node, EdgeKind::Affects);
-
-    ResumeContext context;
+   
+  ResumeContext context; 
+  std::vector<MemoryView> handoffs = latest_handoffs(storage, 1);
+  if (handoffs.empty()) {
+        context.found = false;
+        return context;                       // no handoff yet — caller shows "none"
+    }
+    const MemoryView& handoff = handoffs.front();
     context.handoff_body = handoff.body;
-    context.affected_nodes = affected;
+    const NodeId handoff_node = static_cast<NodeId>(handoff.node_id);
+
+    // resolved affects -> hydrate from the graph (no SQL)
+    for (NodeId node : csr_neighbors(graph.graph.forward, handoff_node, EdgeKind::Affects)) {
+        const Node& n = graph.graph.nodes[to_u32(node)];
+        AffectedNodeView view;
+        view.node_id = node;
+        view.kind  = std::string(node_kind_text(n.kind));
+        view.title = std::string(graph.interner.view(n.title));
+
+        if (n.kind == NodeKind::File) {
+            view.path = view.title;           // file node title IS the path
+        } else if (const auto sym = graph_symbol(graph, node); sym.has_value()) {
+            view.path = sym->path;            // already std::string members
+            view.qualified_name = sym->qualified_name;
+        }
+        context.affected_nodes.push_back(std::move(view));
+    }
+
+    // unresolved affects (target deleted/renamed since the handoff) -> SQL by to_ref
+    Statement stmt(
+        storage.handle(),
+        "SELECT to_ref FROM edges "
+        "WHERE from_node = ? AND kind = 'affects' AND resolved = 0 AND to_ref IS NOT NULL;"
+    );
+    bind_int64(stmt.get(), 1, handoff.node_id);
+    while (stmt.step()) {
+        context.unresolved_affects.push_back(column_text(stmt.get(), 0));
+    }
+
+    context.found = true;
     return context;
-
-
 }
 
 }  // namespace codegraph

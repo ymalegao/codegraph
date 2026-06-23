@@ -502,7 +502,7 @@ int command_doctor(const std::string* path) {
         {"nodes_bad_kind",
          storage.query_int(
              "SELECT COUNT(*) FROM nodes "
-             "WHERE kind NOT IN ('file','symbol','correction','arch_decision');"
+             "WHERE kind NOT IN ('file','symbol','correction','arch_decision', 'handoff');"
          )},
         {"nodes_bad_status",
          storage.query_int(
@@ -1320,6 +1320,13 @@ int command_test_index() {
     std::error_code ignored;
     std::filesystem::remove(db_path, ignored);
 
+    const std::filesystem::path anonymous_file = repo_root / "testing" / "codegraph_anonymous_tmp.cpp";
+    RemoveOnExit remove_anonymous_file{anonymous_file};
+    write_file(
+        anonymous_file,
+        "namespace {\nint anonymous_index_helper() {\n    return 11;\n}\n}\n"
+    );
+
     codegraph::IndexResult index_result;
     codegraph::FrontendRegistry registry = make_frontend_registry();
     {
@@ -1351,6 +1358,12 @@ int command_test_index() {
             storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'main' "
                               "AND file_id = (SELECT file_id FROM files WHERE path = 'testing/sample.cpp');") == 1,
             "indexer did not extract function main"
+        );
+        require(
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'anonymous_index_helper' "
+                              "AND file_id = (SELECT file_id FROM files "
+                              "WHERE path = 'testing/codegraph_anonymous_tmp.cpp');") == 1,
+            "indexer did not extract function inside anonymous namespace"
         );
         require(
             storage.query_int("SELECT COUNT(*) FROM symbols WHERE kind = 'method' "

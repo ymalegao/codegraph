@@ -208,31 +208,9 @@ void collect_symbols(
         type == "class_specifier" ||
         type == "struct_specifier" ||
         type == "enum_specifier") {
+        const int next_type_depth = type == "namespace_definition" ? type_depth : type_depth + 1;
         TSNode name_node = child_by_field(node, "name");
-        if (!ts_node_is_null(name_node)) {
-            const std::string name = node_text(source, name_node);
-            const TSPoint start = ts_node_start_point(node);
-            const TSPoint end = ts_node_end_point(node);
-            const uint32_t start_byte = ts_node_start_byte(node);
-            const uint32_t end_byte = ts_node_end_byte(node);
-
-            SymbolInfo symbol;
-            symbol.kind = symbol_kind_for_type(type);
-            symbol.name = unqualified_name(name);
-            symbol.qualified_name = join_qualified(scope, name);
-            symbol.start_line = start.row + 1U;
-            symbol.end_line = end.row + 1U;
-            symbol.start_byte = start_byte;
-            symbol.end_byte = end_byte;
-            symbol.content_hash = xxh64_hex(source.substr(start_byte, end_byte - start_byte));
-            symbol.parent_index = parent_stack.empty() ? -1 : parent_stack.back();
-
-            const int current_index = static_cast<int>(symbols.size());
-            symbols.push_back(std::move(symbol));
-
-            scope.push_back(name);
-            parent_stack.push_back(current_index);
-            const int next_type_depth = type == "namespace_definition" ? type_depth : type_depth + 1;
+        if (ts_node_is_null(name_node)) {
             const uint32_t count = ts_node_named_child_count(node);
             for (uint32_t i = 0; i < count; ++i) {
                 collect_symbols(
@@ -244,9 +222,44 @@ void collect_symbols(
                     symbols
                 );
             }
-            parent_stack.pop_back();
-            scope.pop_back();
+            return;
         }
+
+        const std::string name = node_text(source, name_node);
+        const TSPoint start = ts_node_start_point(node);
+        const TSPoint end = ts_node_end_point(node);
+        const uint32_t start_byte = ts_node_start_byte(node);
+        const uint32_t end_byte = ts_node_end_byte(node);
+
+        SymbolInfo symbol;
+        symbol.kind = symbol_kind_for_type(type);
+        symbol.name = unqualified_name(name);
+        symbol.qualified_name = join_qualified(scope, name);
+        symbol.start_line = start.row + 1U;
+        symbol.end_line = end.row + 1U;
+        symbol.start_byte = start_byte;
+        symbol.end_byte = end_byte;
+        symbol.content_hash = xxh64_hex(source.substr(start_byte, end_byte - start_byte));
+        symbol.parent_index = parent_stack.empty() ? -1 : parent_stack.back();
+
+        const int current_index = static_cast<int>(symbols.size());
+        symbols.push_back(std::move(symbol));
+
+        scope.push_back(name);
+        parent_stack.push_back(current_index);
+        const uint32_t count = ts_node_named_child_count(node);
+        for (uint32_t i = 0; i < count; ++i) {
+            collect_symbols(
+                ts_node_named_child(node, i),
+                source,
+                scope,
+                parent_stack,
+                next_type_depth,
+                symbols
+            );
+        }
+        parent_stack.pop_back();
+        scope.pop_back();
         return;
     }
 
