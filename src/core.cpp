@@ -1,5 +1,7 @@
 #include "core.h"
 
+#include "memory_kinds.h"
+
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -21,9 +23,9 @@ uint32_t checked_u32_size(size_t value, const char* label) {
 NodeKind node_kind_from_string(std::string_view kind) {
     if (kind == KindText::File) return NodeKind::File;
     if (kind == KindText::Symbol) return NodeKind::Symbol;
-    if (kind == KindText::Correction) return NodeKind::Correction;
-    if (kind == KindText::ArchDecision) return NodeKind::ArchDecision;
-    if (kind == KindText::Handoff) return NodeKind::Handoff;
+    if (const MemoryKind* memory_kind = memory_kind_by_text(kind)) {
+        return memory_kind->node_kind;
+    }
     throw std::runtime_error("unknown node kind: " + std::string(kind));
 }
 
@@ -53,10 +55,33 @@ Status status_from_string(std::string_view status) {
 }
 
 MemoryType memory_type_from_string(std::string_view type) {
-    if (type == KindText::Correction) return MemoryType::Correction;
-    if (type == KindText::ArchDecision) return MemoryType::ArchDecision;
-    if (type == KindText::Handoff) return MemoryType::Handoff;
+    if (const MemoryKind* memory_kind = memory_kind_by_text(type)) {
+        return memory_kind->type;
+    }
     return MemoryType::Unknown;
+}
+
+std::string_view node_kind_text(NodeKind kind) {
+    if (kind == NodeKind::File) {
+        return KindText::File;
+    }
+    if (kind == NodeKind::Symbol) {
+        return KindText::Symbol;
+    }
+    if (const MemoryKind* memory_kind = memory_kind_by_node_kind(kind)) {
+        return memory_kind->text;
+    }
+    return KindText::File;
+}
+
+std::string_view memory_type_text(MemoryType type) {
+    if (type == MemoryType::Unknown) {
+        return KindText::Other;
+    }
+    if (const MemoryKind* memory_kind = memory_kind_by_memory_type(type)) {
+        return memory_kind->text;
+    }
+    return KindText::Other;
 }
 
 StringInterner::StringInterner() : starts_{0} {}

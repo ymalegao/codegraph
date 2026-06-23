@@ -49,16 +49,7 @@ inline constexpr std::string_view Stale = "stale";
 inline constexpr std::string_view Handoff = "handoff";
 }  // namespace KindText
 
-constexpr std::string_view node_kind_text(NodeKind kind) {
-    switch (kind) {
-        case NodeKind::File: return KindText::File;
-        case NodeKind::Symbol: return KindText::Symbol;
-        case NodeKind::Correction: return KindText::Correction;
-        case NodeKind::ArchDecision: return KindText::ArchDecision;
-        case NodeKind::Handoff: return KindText::Handoff;
-    }
-    return KindText::File;
-}
+std::string_view node_kind_text(NodeKind kind);
 
 constexpr std::string_view symbol_kind_text(SymbolKind kind) {
     switch (kind) {
@@ -92,15 +83,7 @@ constexpr std::string_view status_text(Status status) {
     return KindText::Active;
 }
 
-constexpr std::string_view memory_type_text(MemoryType type) {
-    switch (type) {
-        case MemoryType::Correction: return KindText::Correction;
-        case MemoryType::ArchDecision: return KindText::ArchDecision;
-        case MemoryType::Handoff: return KindText::Handoff;
-        case MemoryType::Unknown: return KindText::Other;
-    }
-    return KindText::Other;
-}
+std::string_view memory_type_text(MemoryType type);
 
 NodeKind node_kind_from_string(std::string_view kind);
 SymbolKind symbol_kind_from_string(std::string_view kind);

@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
+#include "memory_kinds.h"
 #include "storage.h"
 
 namespace codegraph {
@@ -29,13 +32,18 @@ struct MaterializeResult {
 };
 
 
-struct HandoffInput{
+struct HandoffInput {
     std::string title;
     std::string body;
     std::vector<std::string> affects;
 };
 
 std::string ensure_device_id(const std::filesystem::path& codegraph_dir);
+std::string append_memory_op(
+    const std::filesystem::path& codegraph_dir,
+    const MemoryKind& kind,
+    const nlohmann::json& payload
+);
 std::string append_correction_op(
     const std::filesystem::path& codegraph_dir,
     const CorrectionInput& input

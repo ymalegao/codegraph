@@ -310,74 +310,36 @@ void mark_applied(Storage& storage, const Operation& op) {
     stmt.expect_done("mark op applied");
 }
 
-void apply_correction(Storage& storage, const Operation& op) {
-    const std::string title = op.payload.value("title", "Correction");
-    const std::string reason = op.payload.value("reason", "");
+int64_t apply_memory(Storage& storage, const Operation& op, const MemoryKind& kind) {
+    const std::string title = op.payload.value("title", std::string(kind.default_title));
+    const std::string body = op.payload.value(std::string(kind.body_field), "");
     const int64_t node_id = upsert_memory_node(
         storage,
         memory_stable_id(op),
-        node_kind_text(NodeKind::Correction),
+        kind.text,
         title,
         op.created_at
     );
-    insert_memory(storage, node_id, memory_type_text(MemoryType::Correction), title, reason, op.created_at);
+    insert_memory(storage, node_id, kind.text, title, body, op.created_at);
 
-    for (const std::string& pattern : json_string_array(op.payload, "prefer_paths")) {
-        insert_path_rule(storage, node_id, "prefer", pattern, reason);
+    if (kind.supports_path_rules) {
+        for (const std::string& pattern : json_string_array(op.payload, "prefer_paths")) {
+            insert_path_rule(storage, node_id, "prefer", pattern, body);
+        }
+        for (const std::string& pattern : json_string_array(op.payload, "avoid_paths")) {
+            insert_path_rule(storage, node_id, "avoid", pattern, body);
+        }
     }
-    for (const std::string& pattern : json_string_array(op.payload, "avoid_paths")) {
-        insert_path_rule(storage, node_id, "avoid", pattern, reason);
-    }
-    for (const std::string& ref : json_string_array(op.payload, "affects")) {
-        insert_affects_edge(storage, node_id, ref);
-    }
-}
-
-void apply_decision(Storage& storage, const Operation& op) {
-    const std::string title = op.payload.value("title", "Decision");
-    const std::string body = op.payload.value("body", "");
-    const int64_t node_id = upsert_memory_node(
-        storage,
-        memory_stable_id(op),
-        node_kind_text(NodeKind::ArchDecision),
-        title,
-        op.created_at
-    );
-    insert_memory(storage, node_id, memory_type_text(MemoryType::ArchDecision), title, body, op.created_at);
 
     for (const std::string& ref : json_string_array(op.payload, "affects")) {
         insert_affects_edge(storage, node_id, ref);
     }
-}
-
-void apply_handoff(Storage& storage, const Operation& op) {
-    const std::string title = op.payload.value("title", "Handoff");
-    const std::string body = op.payload.value("body", "");
-    const int64_t node_id = upsert_memory_node(
-        storage,
-        memory_stable_id(op),
-        node_kind_text(NodeKind::Handoff),
-        title,
-        op.created_at
-    );
-    insert_memory(storage, node_id, memory_type_text(MemoryType::Handoff), title, body, op.created_at);
-
-    for (const std::string& ref : json_string_array(op.payload, "affects")) {
-        insert_affects_edge(storage, node_id, ref);
-    }
+    return node_id;
 }
 
 void apply_operation(Storage& storage, const Operation& op) {
-    if (op.op_type == "ADD_CORRECTION") {
-        apply_correction(storage, op);
-        return;
-    }
-    if (op.op_type == "ADD_DECISION") {
-        apply_decision(storage, op);
-        return;
-    }
-    if (op.op_type == "ADD_HANDOFF") {
-        apply_handoff(storage, op);
+    if (const MemoryKind* kind = memory_kind_by_op_type(op.op_type)) {
+        (void)apply_memory(storage, op, *kind);
         return;
     }
     throw std::runtime_error("unknown op type: " + op.op_type);
@@ -400,43 +362,54 @@ std::string ensure_device_id(const std::filesystem::path& codegraph_dir) {
     return device_id;
 }
 
+std::string append_memory_op(
+    const std::filesystem::path& codegraph_dir,
+    const MemoryKind& kind,
+    const json& payload
+) {
+    return append_op(codegraph_dir, kind.op_type, payload);
+}
+
 std::string append_correction_op(
     const std::filesystem::path& codegraph_dir,
     const CorrectionInput& input
 ) {
+    const MemoryKind* kind = memory_kind_by_memory_type(MemoryType::Correction);
     const json payload{
-        {"title", input.title.empty() ? "Correction" : input.title},
-        {"reason", input.reason},
+        {"title", input.title.empty() ? std::string(kind->default_title) : input.title},
+        {std::string(kind->body_field), input.reason},
         {"prefer_paths", input.prefer_paths},
         {"avoid_paths", input.avoid_paths},
         {"affects", input.affects},
     };
-    return append_op(codegraph_dir, "ADD_CORRECTION", payload);
+    return append_memory_op(codegraph_dir, *kind, payload);
 }
 
 std::string append_decision_op(
     const std::filesystem::path& codegraph_dir,
     const DecisionInput& input
 ) {
+    const MemoryKind* kind = memory_kind_by_memory_type(MemoryType::ArchDecision);
     const json payload{
         {"title", input.title},
-        {"body", input.body},
+        {std::string(kind->body_field), input.body},
         {"affects", input.affects},
     };
-    return append_op(codegraph_dir, "ADD_DECISION", payload);
+    return append_memory_op(codegraph_dir, *kind, payload);
 }
 
 
 std::string append_handoff_op(
     const std::filesystem::path& codegraph_dir,
     const HandoffInput& input
-){
+) {
+    const MemoryKind* kind = memory_kind_by_memory_type(MemoryType::Handoff);
     const json payload{
         {"title", input.title},
-        {"body", input.body},
+        {std::string(kind->body_field), input.body},
         {"affects", input.affects},
     };
-    return append_op(codegraph_dir, "ADD_HANDOFF", payload);
+    return append_memory_op(codegraph_dir, *kind, payload);
 }
 
 MaterializeResult materialize(

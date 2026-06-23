@@ -55,6 +55,7 @@ target_link_options(codegraph_sanitizers INTERFACE
 add_library(codegraph_core
   src/core.cpp
   src/file_util.cpp
+  src/memory_kinds.cpp
   src/time_util.cpp
 )
 
@@ -200,6 +201,7 @@ target_include_directories(codegraph_scanner PUBLIC
 
 target_link_libraries(codegraph_scanner PUBLIC
   codegraph_sanitizers
+  codegraph_core
   codegraph_frontend
   codegraph_hash
   codegraph_resolver
@@ -291,6 +293,7 @@ target_include_directories(codegraph_materializer PUBLIC
 
 target_link_libraries(codegraph_materializer PUBLIC
   codegraph_sanitizers
+  codegraph_core
   codegraph_hash
   codegraph_resolver
   codegraph_storage
@@ -313,6 +316,7 @@ target_include_directories(codegraph_memory_reads PUBLIC
 
 target_link_libraries(codegraph_memory_reads PUBLIC
   codegraph_sanitizers
+  codegraph_core
   codegraph_resolver
   codegraph_storage
 )

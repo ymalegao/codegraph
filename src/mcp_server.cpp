@@ -425,43 +425,50 @@ int64_t node_id_for_memory_op(Storage& storage, std::string_view op_id) {
 }
 
 
-json record_correction_json(McpContext& ctx, const json& args) {
-    CorrectionInput input;
-    input.title = args.value("title", "Correction");
-    input.reason = required_string(args, "reason");
-    input.prefer_paths = optional_string_array(args, "prefer_paths");
-    input.avoid_paths = optional_string_array(args, "avoid_paths");
-    input.affects = optional_string_array(args, "affects");
-    if (input.affects.empty() && input.prefer_paths.empty() && input.avoid_paths.empty()) {
-        throw std::runtime_error("record_correction needs affects, prefer_paths, or avoid_paths");
+json write_memory(McpContext& ctx, const json& args, const MemoryKind& kind) {
+    const std::string title = kind.title_required
+                                  ? required_string(args, "title")
+                                  : args.value("title", std::string(kind.default_title));
+    const std::string body = required_string(args, kind.body_field);
+    const std::vector<std::string> affects = optional_string_array(args, "affects");
+    std::vector<std::string> prefer_paths;
+    std::vector<std::string> avoid_paths;
+    if (kind.supports_path_rules) {
+        prefer_paths = optional_string_array(args, "prefer_paths");
+        avoid_paths = optional_string_array(args, "avoid_paths");
+    }
+
+    switch (kind.affects_rule) {
+        case AffectsRule::Required:
+            if (affects.empty()) {
+                throw std::runtime_error(
+                    std::string(kind.tool_name) + " requires at least one affects entry"
+                );
+            }
+            break;
+        case AffectsRule::RequiredUnlessPathRules:
+            if (affects.empty() && prefer_paths.empty() && avoid_paths.empty()) {
+                throw std::runtime_error(
+                    std::string(kind.tool_name) + " needs affects, prefer_paths, or avoid_paths"
+                );
+            }
+            break;
+        case AffectsRule::Optional:
+            break;
+    }
+
+    json payload{
+        {"title", title},
+        {std::string(kind.body_field), body},
+        {"affects", affects},
+    };
+    if (kind.supports_path_rules) {
+        payload["prefer_paths"] = prefer_paths;
+        payload["avoid_paths"] = avoid_paths;
     }
 
     std::filesystem::create_directories(ctx.codegraph_dir);
-    const std::string op_id = append_correction_op(ctx.codegraph_dir, input);
-    const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
-    const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
-    ctx.graph = build_graph_index(ctx.storage);
-    ctx.data_version = sqlite_data_version(ctx.storage);
-    return {
-        {"op_id", op_id},
-        {"node_id", node_id},
-        {"ops_applied", materialized.ops_applied},
-        {"edges_resolved", materialized.edges_resolved},
-    };
-}
-
-json record_decision_json(McpContext& ctx, const json& args) {
-    DecisionInput input{
-        required_string(args, "title"),
-        required_string(args, "body"),
-        optional_string_array(args, "affects"),
-    };
-    if (input.affects.empty()) {
-        throw std::runtime_error("record_decision requires at least one affects entry");
-    }
-
-    std::filesystem::create_directories(ctx.codegraph_dir);
-    const std::string op_id = append_decision_op(ctx.codegraph_dir, input);
+    const std::string op_id = append_memory_op(ctx.codegraph_dir, kind, payload);
     const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
     const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
     ctx.graph = build_graph_index(ctx.storage);
@@ -495,44 +502,21 @@ json uint_schema(uint32_t fallback) {
 }
 
 
-json write_handoff_schema() {
-    return schema_object({
-        {"title", string_schema("The title of the handoff")},
-        {"body", string_schema("The body of the handoff")},
-        {"affects", {{"type", "array"}, {"items", string_schema()}}},
-    });
-}
-
-
 json resume_from_handoff_schema() {
     return schema_object({});
 }
 
 
-json write_handoff(McpContext& ctx, const json& args) {
-    HandoffInput input{
-        args.value("title", "Handoff"),
-        required_string(args, "body"),
-        optional_string_array(args, "affects"),
-    };
-
-    std::filesystem::create_directories(ctx.codegraph_dir);
-    const std::string op_id = append_handoff_op(ctx.codegraph_dir, input);
-    const MaterializeResult materialized = materialize(ctx.storage, ctx.codegraph_dir);
-    const int64_t node_id = node_id_for_memory_op(ctx.storage, op_id);
-
-    ctx.graph = build_graph_index(ctx.storage);
-    ctx.data_version = sqlite_data_version(ctx.storage);
-
-    return {
-        {"op_id", op_id},
-        {"node_id", node_id},
-        {"ops_applied", materialized.ops_applied},
-        {"edges_resolved", materialized.edges_resolved},
-    };
-
-
-
+json memory_tool_schema(const MemoryKind& kind) {
+    json properties = json::object();
+    properties["title"] = string_schema();
+    properties[std::string(kind.body_field)] = string_schema();
+    properties["affects"] = {{"type", "array"}, {"items", string_schema()}};
+    if (kind.supports_path_rules) {
+        properties["prefer_paths"] = {{"type", "array"}, {"items", string_schema()}};
+        properties["avoid_paths"] = {{"type", "array"}, {"items", string_schema()}};
+    }
+    return {{"type", "object"}, {"properties", properties}};
 }
 
 
@@ -563,7 +547,7 @@ json resume_from_handoff(McpContext& ctx, const json&) {
 
 
 std::vector<ToolDefinition> tool_registry() {
-    return {
+    std::vector<ToolDefinition> tools{
         ToolDefinition{
             "find_symbol",
             "Exact symbol lookup by known name or qualified name using the in-memory graph.",
@@ -617,41 +601,27 @@ std::vector<ToolDefinition> tool_registry() {
             }),
             search_symbol_json,
         },
-        ToolDefinition{
-            "record_correction",
-            "Append and materialize a correction memory, then rebuild the graph.",
-            schema_object({
-                {"title", string_schema()},
-                {"reason", string_schema()},
-                {"affects", {{"type", "array"}, {"items", string_schema()}}},
-                {"prefer_paths", {{"type", "array"}, {"items", string_schema()}}},
-                {"avoid_paths", {{"type", "array"}, {"items", string_schema()}}},
-            }),
-            record_correction_json,
-        },
-        ToolDefinition{
-            "record_decision",
-            "Append and materialize an architectural decision, then rebuild the graph.",
-            schema_object({
-                {"title", string_schema()},
-                {"body", string_schema()},
-                {"affects", {{"type", "array"}, {"items", string_schema()}}},
-            }),
-            record_decision_json,
-        },
-       ToolDefinition{
-            "write_handoff",
-            "Append and materialize a handoff memory, then rebuild the graph.",
-            write_handoff_schema(),
-            write_handoff,
-        },
+    };
+    for (const MemoryKind& memory_kind : kMemoryKinds) {
+        const MemoryKind* kind = &memory_kind;
+        tools.push_back(ToolDefinition{
+            std::string(kind->tool_name),
+            std::string(kind->tool_description),
+            memory_tool_schema(*kind),
+            [kind](McpContext& ctx, const json& args) {
+                return write_memory(ctx, args, *kind);
+            },
+        });
+    }
+    tools.push_back(
         ToolDefinition{
             "resume_from_handoff",
             "Resume the session from the latest handoff.",
             resume_from_handoff_schema(),
             resume_from_handoff,
         }
-    };
+    );
+    return tools;
 }
 
 json tool_response(json id, const json& result, bool is_error = false) {
@@ -710,9 +680,7 @@ bool read_tool_name(std::string_view name) {
            name == "get_memory_for_file" ||
            name == "get_memory_for_symbol" ||
            name == "search_symbol" ||
-           name == "record_correction" ||
-           name == "record_decision" ||
-           name == "write_handoff" ||
+           memory_kind_by_tool_name(name) != nullptr ||
            name == "resume_from_handoff";
 
 }
