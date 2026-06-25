@@ -1,6 +1,8 @@
 #include "mcp_server.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -99,6 +101,41 @@ std::string location(std::string_view path, uint32_t start_line, uint32_t end_li
     return std::string(path) + ":" + std::to_string(start_line) + "-" + std::to_string(end_line);
 }
 
+constexpr std::size_t kBodySnippetMax = 400;
+
+// Truncate long memory bodies (handoffs especially) so list-style results stay cheap;
+// the full body is retrievable via memory_id / resume_from_handoff.
+std::string body_snippet(const std::string& body) {
+    if (body.size() <= kBodySnippetMax) {
+        return body;
+    }
+    return body.substr(0, kBodySnippetMax) + "...";
+}
+
+// Collapse runs of whitespace (including embedded newlines) to single spaces so a
+// multi-line signature reads cleanly on one line in scan-style result lists.
+std::string collapse_whitespace(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool pending_space = false;
+    for (const char ch : text) {
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            pending_space = true;
+            continue;
+        }
+        if (pending_space && !out.empty()) {
+            out.push_back(' ');
+        }
+        pending_space = false;
+        out.push_back(ch);
+    }
+    return out;
+}
+
+double round2(double value) {
+    return std::round(value * 100.0) / 100.0;
+}
+
 json memory_view_json(const MemoryView& memory) {
     json rules = json::array();
     for (const PathRuleView& rule : memory.path_rules) {
@@ -121,6 +158,21 @@ json memory_view_json(const MemoryView& memory) {
     };
 }
 
+// Like memory_view_json but with a snippeted body — used for handoffs attached to a
+// target, which can be long and would otherwise bloat get_memory_for_file responses.
+json memory_snippet_json(const MemoryView& memory) {
+    return {
+        {"memory_id", memory.memory_id},
+        {"node_id", memory.node_id},
+        {"memory_type", memory.memory_type},
+        {"title", memory.title},
+        {"body", body_snippet(memory.body)},
+        {"body_truncated", memory.body.size() > kBodySnippetMax},
+        {"created_at", memory.created_at},
+        {"provenance", memory.provenance},
+    };
+}
+
 json memory_result_json(const MemoryReadResult& memory) {
     json corrections = json::array();
     for (const MemoryView& item : memory.corrections) {
@@ -132,10 +184,16 @@ json memory_result_json(const MemoryReadResult& memory) {
         decisions.push_back(memory_view_json(item));
     }
 
+    json handoffs = json::array();
+    for (const MemoryView& item : memory.handoffs) {
+        handoffs.push_back(memory_snippet_json(item));
+    }
+
     return {
         {"target", memory.target},
         {"corrections", corrections},
         {"decisions", decisions},
+        {"handoffs", handoffs},
     };
 }
 
@@ -145,14 +203,13 @@ json symbol_json(const GraphSymbolView& symbol) {
         {"qualified_name", symbol.qualified_name},
         {"name", symbol.name},
         {"kind", symbol_kind_text(symbol.kind)},
-        {"file", symbol.path},
         {"path", symbol.path},
         {"start_line", symbol.span.start_line},
         {"end_line", symbol.span.end_line},
         {"start_byte", symbol.span.start_byte},
         {"end_byte", symbol.span.end_byte},
         {"location", location(symbol.path, symbol.span.start_line, symbol.span.end_line)},
-        {"signature", symbol.signature},
+        {"signature", collapse_whitespace(symbol.signature)},
     };
 }
 
@@ -291,14 +348,34 @@ json search_symbol_json(McpContext& ctx, const json& args) {
         matches.push_back({
             {"symbol_id", match.symbol_id},
             {"qualified_name", match.qualified_name},
-            {"file", match.path},
             {"path", match.path},
             {"start_line", match.start_line},
             {"end_line", match.end_line},
             {"kind", match.kind},
-            {"signature", match.signature},
-            {"score", match.score},
+            {"signature", collapse_whitespace(match.signature)},
+            {"score", round2(match.score)},
             {"location", location(match.path, match.start_line, match.end_line)},
+        });
+    }
+    return matches;
+}
+
+json find_prior_incidents_json(McpContext& ctx, const json& args) {
+    const std::string query = required_string(args, "query");
+    const uint32_t limit = optional_u32(args, "limit", 10);
+
+    json matches = json::array();
+    for (const MemoryIncidentMatch& match : find_memory_incidents(ctx.storage, query, limit)) {
+        matches.push_back({
+            {"memory_id", match.memory_id},
+            {"node_id", match.node_id},
+            {"memory_type", match.memory_type},
+            {"title", match.title},
+            {"body", body_snippet(match.body)},
+            {"body_truncated", match.body.size() > kBodySnippetMax},
+            {"created_at", match.created_at},
+            {"score", round2(match.score)},
+            {"affects", match.affects},
         });
     }
     return matches;
@@ -658,6 +735,16 @@ std::vector<ToolDefinition> tool_registry() {
                 {"limit", uint_schema(20)},
             }),
             search_symbol_json,
+        },
+        ToolDefinition{
+            "find_prior_incidents",
+            "Search prior corrections/decisions/handoffs (FTS over their bodies) and "
+            "return matches with provenance: memory_type, created_at, and affected paths.",
+            schema_object({
+                {"query", string_schema()},
+                {"limit", uint_schema(10)},
+            }),
+            find_prior_incidents_json,
         },
     };
     for (const MemoryKind& memory_kind : kMemoryKinds) {

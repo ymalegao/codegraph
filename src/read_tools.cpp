@@ -85,12 +85,16 @@ std::string sanitize_fts_query(std::string_view query) {
         terms.push_back(std::move(current));
     }
 
+    // OR the terms with prefix matching so intent phrases ("register mcp tool")
+    // rank by how many tokens hit instead of requiring every token to be present.
+    // bm25 column weights keep name/qualified_name matches ahead of body matches.
     std::string sanitized;
     for (const std::string& term : terms) {
         if (!sanitized.empty()) {
-            sanitized += " ";
+            sanitized += " OR ";
         }
         sanitized += fts_quote(term);
+        sanitized += "*";
     }
     return sanitized;
 }
@@ -215,26 +219,108 @@ std::vector<SymbolSearchMatch> search_symbols(
         normalized_kind = std::string(symbol_kind_text(symbol_kind_from_string(*kind)));
     }
 
+    // Trust contract: OR + prefix matching (sanitize_fts_query) gives intent recall,
+    // but a query that grazes one ubiquitous token must not surface false positives —
+    // "empty means absent, not missed". Two guards:
+    //  - exclude namespace symbols (their FTS body spans the whole file, so they match
+    //    almost anything) unless the caller explicitly asks for kind='namespace';
+    //  - a RELATIVE relevance floor applied below: keep only results within a factor of
+    //    the best score. Relative, not absolute, because bm25 magnitudes are corpus-size
+    //    dependent (a legit match in a tiny repo can score near zero).
     Statement stmt(
         storage.handle(),
         "SELECT s.symbol_id, s.qualified_name, f.path, s.start_line, s.end_line, "
-        "s.kind, COALESCE(s.signature, ''), bm25(fts_symbols, 10.0, 5.0, 1.0) AS score "
+        "s.kind, COALESCE(s.signature, ''), bm25(fts_symbols, 10.0, 5.0, 1.0, 0.5) AS score "
         "FROM fts_symbols "
         "JOIN symbols s ON s.symbol_id = fts_symbols.rowid "
         "JOIN files f ON f.file_id = s.file_id "
         "WHERE fts_symbols MATCH ? "
         "AND (? = '' OR s.kind = ?) "
+        "AND (? != '' OR s.kind != 'namespace') "
         "ORDER BY score, f.path, s.start_line "
         "LIMIT ?;"
     );
     bind_text(stmt.get(), 1, match_query);
     bind_text(stmt.get(), 2, normalized_kind);
     bind_text(stmt.get(), 3, normalized_kind);
-    bind_int64(stmt.get(), 4, limit);
+    bind_text(stmt.get(), 4, normalized_kind);
+    bind_int64(stmt.get(), 5, limit);
 
     std::vector<SymbolSearchMatch> matches;
     while (stmt.step()) {
         matches.push_back(symbol_search_match_from_statement(stmt.get()));
+    }
+
+    // Relative relevance floor: results are ordered best-first (bm25 is
+    // more-negative-is-better). Drop those far weaker than the top match so a query
+    // that only grazes a common token does not trail a wall of near-zero hits. Using
+    // a factor of the best score keeps this corpus-size independent.
+    if (!matches.empty()) {
+        constexpr double kKeepFactor = 0.05;
+        const double cutoff = matches.front().score * kKeepFactor;
+        matches.erase(
+            std::remove_if(
+                matches.begin(), matches.end(),
+                [cutoff](const SymbolSearchMatch& match) { return match.score > cutoff; }
+            ),
+            matches.end()
+        );
+    }
+    return matches;
+}
+
+std::vector<MemoryIncidentMatch> find_memory_incidents(
+    Storage& storage,
+    std::string_view query,
+    uint32_t limit
+) {
+    const std::string match_query = sanitize_fts_query(query);
+    if (match_query.empty() || limit == 0) {
+        return {};
+    }
+
+    Statement stmt(
+        storage.handle(),
+        "SELECT m.memory_id, m.node_id, m.memory_type, m.title, m.body, m.created_at, "
+        "bm25(fts_memories, 2.0, 1.0) AS score "
+        "FROM fts_memories "
+        "JOIN memories m ON m.memory_id = fts_memories.rowid "
+        "WHERE fts_memories MATCH ? "
+        "ORDER BY score, m.created_at DESC "
+        "LIMIT ?;"
+    );
+    bind_text(stmt.get(), 1, match_query);
+    bind_int64(stmt.get(), 2, limit);
+
+    std::vector<MemoryIncidentMatch> matches;
+    while (stmt.step()) {
+        MemoryIncidentMatch match;
+        match.memory_id = sqlite3_column_int64(stmt.get(), 0);
+        match.node_id = sqlite3_column_int64(stmt.get(), 1);
+        match.memory_type = column_text(stmt.get(), 2);
+        match.title = column_text(stmt.get(), 3);
+        match.body = column_text(stmt.get(), 4);
+        match.created_at = column_text(stmt.get(), 5);
+        match.score = sqlite3_column_double(stmt.get(), 6);
+        matches.push_back(std::move(match));
+    }
+
+    // Attach provenance: the paths/symbols each memory affects. A resolved edge
+    // points at a node (use its title); an unresolved one keeps the raw to_ref.
+    Statement affects_stmt(
+        storage.handle(),
+        "SELECT COALESCE(n.title, e.to_ref) "
+        "FROM edges e LEFT JOIN nodes n ON n.node_id = e.to_node "
+        "WHERE e.from_node = ? AND e.kind = 'affects' "
+        "AND COALESCE(n.title, e.to_ref) IS NOT NULL "
+        "ORDER BY 1;"
+    );
+    for (MemoryIncidentMatch& match : matches) {
+        affects_stmt.reset();
+        bind_int64(affects_stmt.get(), 1, match.node_id);
+        while (affects_stmt.step()) {
+            match.affects.push_back(column_text(affects_stmt.get(), 0));
+        }
     }
     return matches;
 }

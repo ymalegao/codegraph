@@ -41,7 +41,8 @@ uint64_t parse_hex_u64(std::string_view text) {
 
 bool active_memory_node(const Node& node) {
     return node.status == Status::Active &&
-           (node.kind == NodeKind::Correction || node.kind == NodeKind::ArchDecision);
+           (node.kind == NodeKind::Correction || node.kind == NodeKind::ArchDecision ||
+            node.kind == NodeKind::Handoff);
 }
 
 Csr build_csr(uint32_t node_count, const std::vector<EdgeRow>& edges, bool reverse) {

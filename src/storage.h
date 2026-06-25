@@ -28,6 +28,10 @@ public:
     sqlite3* handle() const;
 
 private:
+    // Migrate a v1 schema to v2: add symbols.body and rebuild fts_symbols so it
+    // indexes bodies. Bodies stay empty until the next reindex repopulates them.
+    void migrate_v1_to_v2();
+
     sqlite3* db_ = nullptr;
 };
 

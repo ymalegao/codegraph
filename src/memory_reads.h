@@ -32,6 +32,7 @@ struct MemoryReadResult {
     std::string target;
     std::vector<MemoryView> corrections;
     std::vector<MemoryView> decisions;
+    std::vector<MemoryView> handoffs;
 };
 
 

@@ -1,12 +1,10 @@
 {
-  "servers": {
+  "mcpServers": {
     "codegraph": {
       "type": "stdio",
-      "command": "/bin/bash",
-      "args": [
-        "/home/yash/codegraph/codegraph-mcp.sh"
-      ]
+      "command": "./codegraph-mcp.sh",
+      "args": [],
+      "env": {}
     }
-  },
-  "inputs": []
+  }
 }

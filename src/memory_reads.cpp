@@ -77,6 +77,11 @@ void add_memory(MemoryReadResult& result, MemoryView memory) {
         merge_memory(result.corrections, std::move(memory));
     } else if (memory_type == MemoryType::ArchDecision) {
         merge_memory(result.decisions, std::move(memory));
+    } else if (memory_type == MemoryType::Handoff) {
+        // Handoffs affecting a file/symbol are surfaced too — otherwise a file whose
+        // only attached memory is a handoff looks like it has none. Bodies are
+        // snippeted at the JSON layer to avoid dumping full handoff text per target.
+        merge_memory(result.handoffs, std::move(memory));
     }
 }
 

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
@@ -148,6 +149,25 @@ int64_t select_file_id(Statement& select_file_id_stmt, std::string_view path) {
     return sqlite3_column_int64(select_file_id_stmt.get(), 0);
 }
 
+// Cheap binary sniff: a NUL byte in the first 8 KB means we treat the file as
+// binary and skip it. Used to decide whether a non-frontend file is worth a
+// lightweight node (so memories can attach to text files of any kind).
+bool looks_binary(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        return true;
+    }
+    std::array<char, 8192> buffer{};
+    stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize read = stream.gcount();
+    for (std::streamsize i = 0; i < read; ++i) {
+        if (buffer[static_cast<size_t>(i)] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 void prune_unseen_files(
     Storage& storage,
     const FrontendRegistry& registry,
@@ -176,6 +196,53 @@ void prune_unseen_files(
 
     for (const StaleFile& file : stale_files) {
         delete_source_file_projection(storage.handle(), repo_id, file.file_id, file.path, true);
+        ++result.files_pruned;
+    }
+}
+
+// Lightweight file nodes (text files without a frontend) have a node but no
+// `files` row. When such a file disappears we drop its node, but first reset any
+// memory `affects` edges that pointed at it back to unresolved so we never leave
+// a resolved edge dangling (mirrors delete_source_file_projection).
+void prune_unseen_lightweight_file_nodes(
+    Storage& storage,
+    const std::unordered_set<std::string>& seen_paths,
+    ScanResult& result
+) {
+    Statement stmt(
+        storage.handle(),
+        "SELECT node_id, title FROM nodes "
+        "WHERE kind = 'file' AND title NOT IN (SELECT path FROM files);"
+    );
+
+    struct StaleNode {
+        int64_t node_id = 0;
+        std::string title;
+    };
+    std::vector<StaleNode> stale_nodes;
+
+    while (stmt.step()) {
+        const std::string title = column_text(stmt.get(), 1);
+        if (seen_paths.find(title) == seen_paths.end()) {
+            stale_nodes.push_back(StaleNode{sqlite3_column_int64(stmt.get(), 0), title});
+        }
+    }
+
+    Statement reset_affects(
+        storage.handle(),
+        "UPDATE edges SET to_node = NULL, resolved = 0 "
+        "WHERE kind = 'affects' AND to_node = ?;"
+    );
+    Statement delete_node(storage.handle(), "DELETE FROM nodes WHERE node_id = ?;");
+
+    for (const StaleNode& node : stale_nodes) {
+        reset_affects.reset();
+        bind_int64(reset_affects.get(), 1, node.node_id);
+        reset_affects.expect_done("reset affects to stale lightweight node");
+
+        delete_node.reset();
+        bind_int64(delete_node.get(), 1, node.node_id);
+        delete_node.expect_done("delete stale lightweight file node");
         ++result.files_pruned;
     }
 }
@@ -300,13 +367,27 @@ ScanResult scan_repository(
                 continue;
             }
 
-            const LanguageFrontend* frontend = registry.for_extension(it->path().extension().string());
-            if (frontend == nullptr) {
+            const uintmax_t file_size = it->file_size();
+            if (file_size > options.max_file_size_bytes) {
                 continue;
             }
 
-            const uintmax_t file_size = it->file_size();
-            if (file_size > options.max_file_size_bytes) {
+            const LanguageFrontend* frontend = registry.for_extension(it->path().extension().string());
+            if (frontend == nullptr) {
+                // No frontend: still give text files a lightweight node so memories
+                // can attach to any path (docs, configs). No files row, line table,
+                // or symbols — there is nothing to extract.
+                if (looks_binary(it->path())) {
+                    continue;
+                }
+                seen_paths.insert(rel);
+                upsert_file_node.reset();
+                bind_text(upsert_file_node.get(), 1, file_stable_id(options.repo_id, rel));
+                bind_text(upsert_file_node.get(), 2, node_kind_text(NodeKind::File));
+                bind_text(upsert_file_node.get(), 3, rel);
+                bind_text(upsert_file_node.get(), 4, current_utc_timestamp());
+                bind_text(upsert_file_node.get(), 5, status_text(Status::Active));
+                upsert_file_node.expect_done("upsert lightweight file node");
                 continue;
             }
 
@@ -353,6 +434,7 @@ ScanResult scan_repository(
         }
 
         prune_unseen_files(storage, registry, options.repo_id, seen_paths, result);
+        prune_unseen_lightweight_file_nodes(storage, seen_paths, result);
         (void)resolver_pass(storage);
         storage.execute("COMMIT;");
     } catch (...) {

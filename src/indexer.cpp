@@ -1,5 +1,6 @@
 #include "indexer.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -68,21 +69,38 @@ int64_t upsert_source_node(
     return sqlite3_column_int64(select_node_stmt.get(), 0);
 }
 
-int64_t insert_symbol_row(sqlite3* db, Statement& insert_symbol_stmt, const FileRow& file, const SymbolInfo& symbol) {
+int64_t insert_symbol_row(
+    sqlite3* db,
+    Statement& insert_symbol_stmt,
+    const FileRow& file,
+    const SymbolInfo& symbol,
+    std::string_view body
+) {
     insert_symbol_stmt.reset();
     bind_int64(insert_symbol_stmt.get(), 1, file.file_id);
     bind_text(insert_symbol_stmt.get(), 2, symbol_kind_text(symbol_kind_from_string(symbol.kind)));
     bind_text(insert_symbol_stmt.get(), 3, symbol.name);
     bind_text(insert_symbol_stmt.get(), 4, symbol.qualified_name);
     bind_text(insert_symbol_stmt.get(), 5, symbol.signature);
-    bind_int64(insert_symbol_stmt.get(), 6, symbol.start_line);
-    bind_int64(insert_symbol_stmt.get(), 7, symbol.end_line);
-    bind_int64(insert_symbol_stmt.get(), 8, symbol.start_byte);
-    bind_int64(insert_symbol_stmt.get(), 9, symbol.end_byte);
-    bind_text(insert_symbol_stmt.get(), 10, symbol.content_hash);
-    bind_text(insert_symbol_stmt.get(), 11, file.content_hash);
+    bind_text(insert_symbol_stmt.get(), 6, body);
+    bind_int64(insert_symbol_stmt.get(), 7, symbol.start_line);
+    bind_int64(insert_symbol_stmt.get(), 8, symbol.end_line);
+    bind_int64(insert_symbol_stmt.get(), 9, symbol.start_byte);
+    bind_int64(insert_symbol_stmt.get(), 10, symbol.end_byte);
+    bind_text(insert_symbol_stmt.get(), 11, symbol.content_hash);
+    bind_text(insert_symbol_stmt.get(), 12, file.content_hash);
     insert_symbol_stmt.expect_done("insert symbol");
     return sqlite3_last_insert_rowid(db);
+}
+
+// Slice a symbol's source text from the file contents using its byte span.
+std::string symbol_body_text(std::string_view source, const SymbolInfo& symbol) {
+    const auto start = static_cast<size_t>(symbol.start_byte);
+    const auto end = static_cast<size_t>(symbol.end_byte);
+    if (start >= source.size() || end <= start) {
+        return {};
+    }
+    return std::string(source.substr(start, std::min(end, source.size()) - start));
 }
 
 void insert_edge_row(
@@ -111,9 +129,16 @@ void insert_edge_row(
 }
 
 bool source_projection_is_current(sqlite3* db, const FileRow& file) {
+    // A file is current only if its symbols match the present content hash AND have
+    // their body populated. The body requirement makes re-indexing self-healing: a
+    // schema migration that adds the body column (or any future per-symbol field)
+    // leaves old rows with body IS NULL, so a single ordinary `index` run backfills
+    // them — no delete-and-rebootstrap. The indexer always writes a non-NULL body
+    // (empty string for a zero-length span), so this only re-extracts stale rows.
     Statement stmt(
         db,
-        "SELECT COUNT(*) FROM symbols WHERE file_id = ? AND commit_hash = ?;"
+        "SELECT COUNT(*) FROM symbols "
+        "WHERE file_id = ? AND commit_hash = ? AND body IS NOT NULL;"
     );
     bind_int64(stmt.get(), 1, file.file_id);
     bind_text(stmt.get(), 2, file.content_hash);
@@ -140,9 +165,9 @@ IndexResult index_repository(
     Statement select_node(storage.handle(), "SELECT node_id FROM nodes WHERE stable_id = ?;");
     Statement insert_symbol(
         storage.handle(),
-        "INSERT INTO symbols(file_id, kind, name, qualified_name, signature, "
+        "INSERT INTO symbols(file_id, kind, name, qualified_name, signature, body, "
         "start_line, end_line, start_byte, end_byte, content_hash, commit_hash) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
     );
     Statement insert_edge(
         storage.handle(),
@@ -201,7 +226,10 @@ IndexResult index_repository(
                 std::vector<IndexedSymbol> symbols;
                 symbols.reserve(extracted.symbols.size());
                 for (const SymbolInfo& symbol : extracted.symbols) {
-                    (void)insert_symbol_row(storage.handle(), insert_symbol, file, symbol);
+                    (void)insert_symbol_row(
+                        storage.handle(), insert_symbol, file, symbol,
+                        symbol_body_text(source, symbol)
+                    );
                     const std::string stable =
                         symbol_stable_id(options.repo_id, file.path, symbol.qualified_name);
                     const int64_t symbol_node_id = upsert_source_node(

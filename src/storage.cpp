@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS symbols (
   name           TEXT NOT NULL,
   qualified_name TEXT NOT NULL,
   signature      TEXT,
+  body           TEXT,
   start_line     INTEGER NOT NULL,
   end_line       INTEGER NOT NULL,
   start_byte     INTEGER NOT NULL,
@@ -102,6 +103,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
   name,
   qualified_name,
   signature,
+  body,
   content='symbols',
   content_rowid='symbol_id'
 );
@@ -114,20 +116,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
 );
 
 CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
-  INSERT INTO fts_symbols(rowid, name, qualified_name, signature)
-  VALUES (new.symbol_id, new.name, new.qualified_name, new.signature);
+  INSERT INTO fts_symbols(rowid, name, qualified_name, signature, body)
+  VALUES (new.symbol_id, new.name, new.qualified_name, new.signature, new.body);
 END;
 
 CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
-  INSERT INTO fts_symbols(fts_symbols, rowid, name, qualified_name, signature)
-  VALUES ('delete', old.symbol_id, old.name, old.qualified_name, old.signature);
+  INSERT INTO fts_symbols(fts_symbols, rowid, name, qualified_name, signature, body)
+  VALUES ('delete', old.symbol_id, old.name, old.qualified_name, old.signature, old.body);
 END;
 
 CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
-  INSERT INTO fts_symbols(fts_symbols, rowid, name, qualified_name, signature)
-  VALUES ('delete', old.symbol_id, old.name, old.qualified_name, old.signature);
-  INSERT INTO fts_symbols(rowid, name, qualified_name, signature)
-  VALUES (new.symbol_id, new.name, new.qualified_name, new.signature);
+  INSERT INTO fts_symbols(fts_symbols, rowid, name, qualified_name, signature, body)
+  VALUES ('delete', old.symbol_id, old.name, old.qualified_name, old.signature, old.body);
+  INSERT INTO fts_symbols(rowid, name, qualified_name, signature, body)
+  VALUES (new.symbol_id, new.name, new.qualified_name, new.signature, new.body);
 END;
 
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
@@ -147,7 +149,7 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
   VALUES (new.memory_id, new.title, new.body);
 END;
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 )sql";
 
 }  // namespace
@@ -188,7 +190,31 @@ Storage& Storage::operator=(Storage&& other) noexcept {
 }
 
 void Storage::initialize_schema() {
+    const int64_t version = query_int("PRAGMA user_version;");
+    const bool needs_v2_migration = version >= 1 && version < 2;
+    if (needs_v2_migration) {
+        migrate_v1_to_v2();
+    }
     execute(kSchemaSql);
+    if (needs_v2_migration) {
+        // fts_symbols was just recreated with the body column; repopulate it from
+        // the symbols content table so row counts stay in sync (doctor drift check).
+        execute("INSERT INTO fts_symbols(fts_symbols) VALUES('rebuild');");
+    }
+}
+
+void Storage::migrate_v1_to_v2() {
+    execute(
+        "DROP TRIGGER IF EXISTS symbols_ai;"
+        "DROP TRIGGER IF EXISTS symbols_ad;"
+        "DROP TRIGGER IF EXISTS symbols_au;"
+        "DROP TABLE IF EXISTS fts_symbols;"
+    );
+    const bool has_body =
+        query_int("SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'body';") > 0;
+    if (!has_body) {
+        execute("ALTER TABLE symbols ADD COLUMN body TEXT;");
+    }
 }
 
 void Storage::execute(std::string_view sql) {

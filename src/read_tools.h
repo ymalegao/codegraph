@@ -43,6 +43,17 @@ struct SymbolSearchMatch {
     double score = 0.0;
 };
 
+struct MemoryIncidentMatch {
+    int64_t memory_id = 0;
+    int64_t node_id = 0;
+    std::string memory_type;
+    std::string title;
+    std::string body;
+    std::string created_at;
+    double score = 0.0;
+    std::vector<std::string> affects;
+};
+
 struct ReadSymbolResult {
     ReadStatus status = ReadStatus::NotFound;
     SymbolMatch symbol;
@@ -71,6 +82,14 @@ std::vector<SymbolSearchMatch> search_symbols(
     std::string_view query,
     std::optional<std::string_view> kind = std::nullopt,
     uint32_t limit = 20
+);
+
+// FTS over correction/decision/handoff bodies, returning each hit with provenance
+// (memory_type, created_at, and the paths/symbols it affects). Powers find_prior_incidents.
+std::vector<MemoryIncidentMatch> find_memory_incidents(
+    Storage& storage,
+    std::string_view query,
+    uint32_t limit = 10
 );
 
 ReadSymbolResult read_symbol_verified(

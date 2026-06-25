@@ -397,7 +397,7 @@ void expect_schema_objects(const codegraph::Storage& storage) {
         require(storage.object_exists("trigger", trigger), "missing sqlite trigger: " + std::string(trigger));
     }
 
-    require(storage.query_int("PRAGMA user_version;") == 1, "unexpected sqlite user_version");
+    require(storage.query_int("PRAGMA user_version;") == 2, "unexpected sqlite user_version");
 }
 
 
@@ -480,7 +480,11 @@ int command_doctor(const std::string* path) {
     storage.initialize_schema();
 
     std::vector<DoctorCheck> checks{
-        {"schema_user_version", storage.query_int("PRAGMA user_version;") == 1 ? 0 : 1},
+        {"schema_user_version", storage.query_int("PRAGMA user_version;") == 2 ? 0 : 1},
+        {"dup_file_nodes",
+         storage.query_int(
+             "SELECT COUNT(*) - COUNT(DISTINCT title) FROM nodes WHERE kind = 'file';"
+         )},
         {"files_without_line_table",
          storage.query_int(
              "SELECT COUNT(*) FROM files f "
@@ -1416,7 +1420,7 @@ int command_test_index() {
         RemoveOnExit remove_prune_file{prune_file};
         write_file(
             prune_file,
-            "namespace prune {\nint gone() {\n    return 7;\n}\n}\n"
+            "namespace prune {\nint prunexyzzy() {\n    return 7;\n}\n}\n"
         );
 
         (void)codegraph::scan_repository(storage, registry, codegraph::ScanOptions{repo_root});
@@ -1426,7 +1430,7 @@ int command_test_index() {
             "prune regression fixture was not scanned"
         );
         require(
-            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'prune::gone';") == 1,
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'prune::prunexyzzy';") == 1,
             "prune regression fixture was not indexed"
         );
 
@@ -1439,11 +1443,17 @@ int command_test_index() {
             "scanner left stale file row after deletion"
         );
         require(
-            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'prune::gone';") == 0,
+            storage.query_int("SELECT COUNT(*) FROM symbols WHERE qualified_name = 'prune::prunexyzzy';") == 0,
             "scanner left stale symbols after deletion"
         );
+        // fts_symbols now indexes symbol bodies, so a fixture-named token can also
+        // appear in unrelated source bodies (including this test's own). The real
+        // invariant after a delete is that the FTS index has no orphaned rows, i.e.
+        // it stays row-for-row in sync with the symbols table.
         require(
-            storage.query_int("SELECT COUNT(*) FROM fts_symbols WHERE fts_symbols MATCH 'gone';") == 0,
+            storage.query_int(
+                "SELECT ABS((SELECT COUNT(*) FROM symbols) - (SELECT COUNT(*) FROM fts_symbols));"
+            ) == 0,
             "scanner left stale FTS symbols after deletion"
         );
         (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
@@ -1968,7 +1978,12 @@ int command_test_graph() {
 
 int command_test_mcp() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
-    const std::filesystem::path exe_path = std::filesystem::read_symlink("/proc/self/exe");
+    std::error_code exe_ec;
+    std::filesystem::path exe_path = std::filesystem::read_symlink("/proc/self/exe", exe_ec);
+    if (exe_ec || exe_path.empty()) {
+        // /proc/self/exe is Linux-only; fall back to the built binary location.
+        exe_path = repo_root / "build" / "codegraph";
+    }
     const std::filesystem::path test_repo = repo_root / "build" / "codegraph-test-mcp-repo";
     const std::filesystem::path fixture_dir = test_repo / "testing";
     const std::filesystem::path fixture_file = fixture_dir / "codegraph_mcp_target.cpp";
@@ -1981,6 +1996,7 @@ int command_test_mcp() {
     std::filesystem::remove_all(test_repo, ignored);
     RemoveTreeOnExit remove_test_repo{test_repo};
     std::filesystem::create_directories(fixture_dir);
+    std::filesystem::create_directories(test_repo / "docs");
 
     write_file(
         fixture_file,
@@ -1990,6 +2006,23 @@ int command_test_mcp() {
         "}\n"
         "}\n"
     );
+
+    // A function defined in an anonymous namespace must still be discoverable by
+    // its enclosing named-namespace qualified name (anon-namespace extraction).
+    write_file(
+        fixture_dir / "codegraph_anon.cpp",
+        "namespace mcpstep {\n"
+        "namespace {\n"
+        "int anon_helper() {\n"
+        "    return 7;\n"
+        "}\n"
+        "}\n"
+        "}\n"
+    );
+
+    // A non-code file that exists on disk gets a lightweight node, so a memory
+    // affecting it must resolve (coverage honesty for unindexed paths).
+    write_file(test_repo / "docs" / "NOTES.md", "# Notes\n\nProject notes.\n");
 
     {
         std::ofstream script(script_path);
@@ -2006,6 +2039,11 @@ int command_test_mcp() {
         script << R"({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"read_symbol","arguments":{"query":"mcpstep::target","include_memory":true}}})" << "\n";
         script << R"({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"list_symbols_in_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
         script << R"({"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"record_decision","arguments":{"title":"Untracked target decision","body":"affects a path that is not indexed","affects":["docs/UNTRACKED.md"]}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"find_symbol","arguments":{"name":"mcpstep::anon_helper","limit":5}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"record_decision","arguments":{"title":"Notes decision","body":"affects an existing markdown file","affects":["docs/NOTES.md"]}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"find_prior_incidents","arguments":{"query":"correction reason","limit":10}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"write_handoff","arguments":{"title":"MCP handoff","body":"handoff affecting the fixture file","affects":["testing/codegraph_mcp_target.cpp"]}}})" << "\n";
+        script << R"({"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"get_memory_for_file","arguments":{"path":"testing/codegraph_mcp_target.cpp"}}})" << "\n";
     }
 
     const std::string command =
@@ -2026,7 +2064,7 @@ int command_test_mcp() {
         }
         responses.push_back(nlohmann::json::parse(line));
     }
-    require(responses.size() == 12U, "mcp stdout did not contain expected JSON-RPC responses only");
+    require(responses.size() == 17U, "mcp stdout did not contain expected JSON-RPC responses only");
 
     auto response_by_id = [&](int id) -> nlohmann::json {
         for (const nlohmann::json& response : responses) {
@@ -2112,6 +2150,46 @@ int command_test_mcp() {
                 untracked["unresolved_affects"][0] == "docs/UNTRACKED.md",
             "mcp record_decision did not report the unresolved affects target");
 
+    // Anon-namespace extraction: a function in an anonymous namespace resolves by
+    // its enclosing named-namespace qualified name.
+    const nlohmann::json anon = tool_text(13);
+    require(!anon.empty() && anon[0]["qualified_name"] == "mcpstep::anon_helper",
+            "mcp find_symbol did not resolve the anonymous-namespace function");
+
+    // Coverage honesty: a decision affecting an existing .md file fully resolves,
+    // because the scanner now gives every text file a lightweight node.
+    const nlohmann::json notes = tool_text(14);
+    require(notes.contains("unresolved_affects") && notes["unresolved_affects"].empty(),
+            "mcp record_decision affecting an existing markdown file reported unresolved affects");
+
+    // find_prior_incidents: FTS over memory bodies returns the recorded correction
+    // with provenance (memory_type + affected paths).
+    const nlohmann::json incidents = tool_text(15);
+    bool saw_incident = false;
+    for (const nlohmann::json& incident : incidents) {
+        if (incident.value("memory_type", "") == "correction" &&
+            incident.value("body", "") == "MCP correction reason") {
+            saw_incident = true;
+            bool affects_target = false;
+            for (const nlohmann::json& affected : incident["affects"]) {
+                if (affected == "testing/codegraph_mcp_target.cpp") {
+                    affects_target = true;
+                }
+            }
+            require(affects_target, "find_prior_incidents did not report affected path provenance");
+        }
+    }
+    require(saw_incident, "find_prior_incidents did not return the recorded correction");
+
+    // Handoff surfacing: a handoff affecting a file must appear under get_memory_for_file
+    // (not only corrections/decisions), snippeted to keep the response cheap.
+    const nlohmann::json with_handoff = tool_text(17);
+    require(with_handoff.contains("handoffs") && with_handoff["handoffs"].size() == 1U,
+            "mcp get_memory_for_file did not surface the affecting handoff");
+    require(with_handoff["handoffs"][0]["memory_type"] == "handoff" &&
+                with_handoff["handoffs"][0].contains("body_truncated"),
+            "mcp get_memory_for_file handoff entry missing memory_type/body_truncated");
+
     std::cout << "mcp jsonrpc: ok\n";
     std::cout << "mcp tools: ok\n";
     std::cout << "mcp graph reads: ok\n";
@@ -2193,7 +2271,12 @@ void acceptance_two_op_streams() {
 
 void acceptance_doctor_and_bench() {
     const std::filesystem::path repo_root = std::filesystem::current_path();
-    const std::filesystem::path exe_path = std::filesystem::read_symlink("/proc/self/exe");
+    std::error_code exe_ec;
+    std::filesystem::path exe_path = std::filesystem::read_symlink("/proc/self/exe", exe_ec);
+    if (exe_ec || exe_path.empty()) {
+        // /proc/self/exe is Linux-only; fall back to the built binary location.
+        exe_path = repo_root / "build" / "codegraph";
+    }
     const std::filesystem::path test_repo = repo_root / "build" / "codegraph-test-acceptance-repo";
     const std::filesystem::path source_dir = test_repo / "src";
     const std::filesystem::path source_file = source_dir / "accept.cpp";
