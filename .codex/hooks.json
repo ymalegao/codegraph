@@ -2,18 +2,20 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
             "command": "python3 \"$(git rev-parse --show-toplevel)/hooks/codegraph_session.py\" session-start",
-            "timeout": 60
+            "timeout": 60,
+            "statusMessage": "Loading verified CodeGraph handoff"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|mcp__codegraph.*(record_correction|record_decision|write_handoff)$",
+        "matcher": "Bash|apply_patch|Edit|Write|mcp__codegraph.*(record_correction|record_decision|write_handoff)$",
         "hooks": [
           {
             "type": "command",
@@ -25,6 +27,7 @@
     ],
     "PreCompact": [
       {
+        "matcher": "manual|auto",
         "hooks": [
           {
             "type": "command",

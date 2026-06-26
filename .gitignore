@@ -1,4 +1,6 @@
 build/
+build-lifecycle/
+**/__pycache__/
 *.o
 *.out
 testing/helloworld

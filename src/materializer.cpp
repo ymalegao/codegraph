@@ -434,7 +434,9 @@ MaterializeResult materialize(
         result.edges_resolved = resolver_pass(storage);
         storage.execute("COMMIT;");
     } catch (...) {
-        storage.execute("ROLLBACK;");
+        if (sqlite3_get_autocommit(storage.handle()) == 0) {
+            storage.execute("ROLLBACK;");
+        }
         throw;
     }
 

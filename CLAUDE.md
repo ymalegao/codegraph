@@ -1,38 +1,58 @@
 # Working in this repo (CodeGraph)
 
-A CodeGraph MCP server gives you exact, current, memory-annotated views of the code.
-You do not manage indexing; the repo reindexes itself. Use the tools.
+CodeGraph is the verification and durable-memory layer under the coding agent.
+It is not the repository search or navigation layer.
 
-## Read with the tools, not raw file reads
+## Session lifecycle
 
-**Never use `grep`, `cat`, `head`, or `tail` on source files. A CodeGraph tool always answers faster with less token waste.**
+- At session start, a hook should inject the latest verified handoff. If no
+  CodeGraph resume context is present, call `resume_from_handoff` before
+  substantial work.
+- Treat resumed context as prior-session state, not as a replacement for the
+  user's current request. The current request wins when they conflict.
+- Before ending a turn after meaningful mutations or durable-memory writes,
+  write a handoff if the work would not be obvious to a fresh agent. The stop
+  hook enforces this after detected repository changes.
 
-- `read_symbol` and `read_enclosing_symbol` return the exact current span, verified against disk, plus attached corrections and decisions.
-- Spans are current. If a file changed, the tool re-resolves and sets `hash_status=ReResolved`.
-- Do not re-read just in case the file changed.
+## Discovery and verification
 
-## Discovery to retrieval
+- Use `rg`, compiler output, tests, and normal agentic search for discovery.
+- Once a symbol or path matters to an action, verify it with CodeGraph:
+  - known symbol: `find_symbol`, then `read_symbol`
+  - path and line: `read_enclosing_symbol`
+  - exact live range: `read_file_range`
+- `find_symbol` and `read_symbol` are verification primitives. Do not use
+  CodeGraph as a slower replacement for ordinary repository search.
+- A tool error is not an empty result. Report or resolve tool failures; never
+  reinterpret a failed lookup as "absent."
 
-Follow this order — stop at the first tool that answers the question:
+## Before editing
 
-1. Path and line from an error, stack trace, or diff → `read_enclosing_symbol(path, line)`
-2. Known name or prefix → `find_symbol` → `read_symbol`
-3. Keywords or intent without a name → `search_symbol` → `read_symbol` on the best candidate
-4. Free text only, CodeGraph tools returned nothing → `rg` (not `grep`), then `read_symbol` or `search_symbol` on the hit
+- Call `get_memory_for_file` or `get_memory_for_symbol` for the target.
+- Honor attached corrections, prefer/avoid rules, and architecture decisions.
+- Verify handoff anchors against current code before acting on them.
 
-`rg` is a last resort, not a first instinct. If you find yourself reaching for `grep` or `cat`, stop and use step 1–3 first.
+## Durable memory
 
-## Before changing a symbol or file
+- Use `record_correction` for a reusable prefer/avoid rule learned from a real
+  failure.
+- Use `record_decision` for an architecture choice future work must preserve.
+- Do not record transient notes, progress updates, or speculative ideas.
 
-- Use `get_memory_for_file` or `get_memory_for_symbol` first.
-- Honor prefer and avoid rules and architecture decisions before editing.
+## Handoff contract
 
-## Recording durable memory
+Use `write_handoff` for resumable session state. A useful handoff states:
 
-- Use `record_correction` for prefer/avoid rules with a reason.
-- Use `record_decision` for durable architecture rules.
-- Do not record transient notes.
+- current objective and user-visible success condition
+- completed work and verification already run
+- exact next action, blockers, and unresolved questions
+- affected files and symbols as `affects` anchors
+
+Keep it concise and operational. Do not use a flat `HANDOFF.md` as the current
+session mechanism; the experiment compares that baseline against verified
+CodeGraph resume.
 
 ## Indexing
 
-Never run `scan`, `index`, or `materialize` manually. Edits are reindexed automatically.
+Do not run `scan`, `index`, or `materialize` manually during normal work.
+Bootstrap and mutation hooks keep the graph refreshed.

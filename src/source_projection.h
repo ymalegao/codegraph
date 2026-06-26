@@ -8,6 +8,10 @@
 
 namespace codegraph {
 
+// Bump whenever extraction semantics or persisted source projection fields
+// change. Unchanged files with an older value are re-extracted automatically.
+inline constexpr int64_t kSourceProjectionVersion = 1;
+
 struct SymbolStableIdParts {
     std::string repo_id;
     std::string path;
@@ -19,6 +23,11 @@ std::string symbol_stable_id(std::string_view repo_id, std::string_view path, st
 std::string symbol_stable_prefix(std::string_view repo_id, std::string_view path);
 std::string symbol_stable_suffix(std::string_view path, std::string_view qualified_name);
 bool parse_symbol_stable_id(std::string_view stable_id, SymbolStableIdParts& parts);
+
+uint32_t prune_source_nodes_for_other_repositories(
+    sqlite3* db,
+    std::string_view repo_id
+);
 
 void delete_source_file_projection(
     sqlite3* db,

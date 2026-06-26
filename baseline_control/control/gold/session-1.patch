@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fixture Author <fixture@example.invalid>
+Date: Thu, 25 Jun 2026 12:28:10 -0700
+Subject: [PATCH] gold: preserve descending priority invariant
+
+---
+ src/policy/priority_policy.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/policy/priority_policy.cpp b/src/policy/priority_policy.cpp
+index 79d5b6b..8b6cb65 100644
+--- a/src/policy/priority_policy.cpp
++++ b/src/policy/priority_policy.cpp
+@@ -3,7 +3,7 @@
+ namespace rs::policy {
+ 
+ bool higher_priority_first(const model::Job& lhs, const model::Job& rhs) {
+-    return lhs.priority < rhs.priority;
++    return lhs.priority > rhs.priority;
+ }
+ 
+ }  // namespace rs::policy

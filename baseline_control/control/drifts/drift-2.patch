@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fixture Author <fixture@example.invalid>
+Date: Thu, 25 Jun 2026 12:28:01 -0700
+Subject: [PATCH] drift: fold helper and relocate config rule
+
+---
+ CMakeLists.txt                       |  3 +--
+ include/rs/config/config_rules.h     | 12 ------------
+ include/rs/policy/eligibility_gate.h | 20 ++++++++++++++++++++
+ include/rs/util/append_if_eligible.h | 12 ------------
+ src/config/config_rules.cpp          | 12 ------------
+ src/policy/eligibility_gate.cpp      | 18 ++++++++++++++++++
+ src/scheduler/plan_composer.cpp      |  8 ++++++--
+ src/util/append_if_eligible.cpp      | 14 --------------
+ 8 files changed, 45 insertions(+), 54 deletions(-)
+ delete mode 100644 include/rs/config/config_rules.h
+ create mode 100644 include/rs/policy/eligibility_gate.h
+ delete mode 100644 include/rs/util/append_if_eligible.h
+ delete mode 100644 src/config/config_rules.cpp
+ create mode 100644 src/policy/eligibility_gate.cpp
+ delete mode 100644 src/util/append_if_eligible.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9ecbba4..1076132 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -6,12 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+ 
+ add_library(request_scheduler
+-    src/config/config_rules.cpp
+     src/config/scheduler_config.cpp
+     src/model/flush_plan.cpp
+     src/model/job.cpp
+     src/model/scheduled_job.cpp
+     src/policy/batch_policy.cpp
++    src/policy/eligibility_gate.cpp
+     src/policy/eligibility_policy.cpp
+     src/policy/priority_policy.cpp
+     src/policy/tie_break_policy.cpp
+@@ -19,7 +19,6 @@ add_library(request_scheduler
+     src/scheduler/plan_composer.cpp
+     src/scheduler/queue.cpp
+     src/scheduler/request_scheduler.cpp
+-    src/util/append_if_eligible.cpp
+     src/util/id.cpp
+     src/util/stable_order.cpp
+     src/util/validation.cpp
+diff --git a/include/rs/config/config_rules.h b/include/rs/config/config_rules.h
+deleted file mode 100644
+index 72f0dba..0000000
+--- a/include/rs/config/config_rules.h
++++ /dev/null
+@@ -1,12 +0,0 @@
+-#pragma once
+-
+-#include "rs/config/scheduler_config.h"
+-#include "rs/model/job.h"
+-
+-namespace rs::config {
+-
+-bool background_is_allowed(const model::Job& job,
+-                           const SchedulerConfig& config,
+-                           bool has_interactive_job);
+-
+-}  // namespace rs::config
+diff --git a/include/rs/policy/eligibility_gate.h b/include/rs/policy/eligibility_gate.h
+new file mode 100644
+index 0000000..51ab3e6
+--- /dev/null
++++ b/include/rs/policy/eligibility_gate.h
+@@ -0,0 +1,20 @@
++#pragma once
++
++#include "rs/config/scheduler_config.h"
++#include "rs/model/job.h"
++
++namespace rs::policy {
++
++class EligibilityGate {
++public:
++    EligibilityGate(const config::SchedulerConfig& config,
++                    bool has_interactive_job);
++
++    bool allow(const model::Job& job) const;
++
++private:
++    config::SchedulerConfig config_;
++    bool has_interactive_job_;
++};
++
++}  // namespace rs::policy
+diff --git a/include/rs/util/append_if_eligible.h b/include/rs/util/append_if_eligible.h
+deleted file mode 100644
+index 402e2ef..0000000
+--- a/include/rs/util/append_if_eligible.h
++++ /dev/null
+@@ -1,12 +0,0 @@
+-#pragma once
+-
+-#include "rs/model/job.h"
+-
+-#include <vector>
+-
+-namespace rs::util {
+-
+-void append_if_eligible(std::vector<model::Job>& output,
+-                        const model::Job& candidate);
+-
+-}  // namespace rs::util
+diff --git a/src/config/config_rules.cpp b/src/config/config_rules.cpp
+deleted file mode 100644
+index 3a41f24..0000000
+--- a/src/config/config_rules.cpp
++++ /dev/null
+@@ -1,12 +0,0 @@
+-#include "rs/config/config_rules.h"
+-
+-namespace rs::config {
+-
+-bool background_is_allowed(const model::Job&,
+-                           const SchedulerConfig&,
+-                           bool) {
+-    // Follow-up after batch limiting: honor defer_background_when_interactive.
+-    return true;
+-}
+-
+-}  // namespace rs::config
+diff --git a/src/policy/eligibility_gate.cpp b/src/policy/eligibility_gate.cpp
+new file mode 100644
+index 0000000..567c740
+--- /dev/null
++++ b/src/policy/eligibility_gate.cpp
+@@ -0,0 +1,18 @@
++#include "rs/policy/eligibility_gate.h"
++
++#include "rs/policy/eligibility_policy.h"
++
++namespace rs::policy {
++
++EligibilityGate::EligibilityGate(const config::SchedulerConfig& config,
++                                 bool has_interactive_job)
++    : config_(config), has_interactive_job_(has_interactive_job) {}
++
++bool EligibilityGate::allow(const model::Job& job) const {
++    (void)config_;
++    (void)has_interactive_job_;
++    // Remaining task: enforce the relocated background deferral rule here.
++    return is_eligible(job);
++}
++
++}  // namespace rs::policy
+diff --git a/src/scheduler/plan_composer.cpp b/src/scheduler/plan_composer.cpp
+index ebd96cd..3b21232 100644
+--- a/src/scheduler/plan_composer.cpp
++++ b/src/scheduler/plan_composer.cpp
+@@ -1,8 +1,9 @@
+ #include "rs/scheduler/plan_composer.h"
+ 
+ #include "rs/policy/batch_policy.h"
+-#include "rs/util/append_if_eligible.h"
++#include "rs/policy/eligibility_gate.h"
+ #include "rs/util/stable_order.h"
++#include "rs/util/vector_ops.h"
+ 
+ namespace rs::scheduler {
+ 
+@@ -11,8 +12,11 @@ model::FlushPlan PlanComposer::compose(
+     const config::SchedulerConfig& config) const {
+     std::vector<model::Job> eligible;
+     eligible.reserve(jobs.size());
++    const policy::EligibilityGate gate(config, util::has_interactive_job(jobs));
+     for (const auto& job : jobs) {
+-        util::append_if_eligible(eligible, job);
++        if (gate.allow(job)) {
++            eligible.push_back(job);
++        }
+     }
+ 
+     util::stable_priority_sort(eligible);
+diff --git a/src/util/append_if_eligible.cpp b/src/util/append_if_eligible.cpp
+deleted file mode 100644
+index 2a2ddac..0000000
+--- a/src/util/append_if_eligible.cpp
++++ /dev/null
+@@ -1,14 +0,0 @@
+-#include "rs/util/append_if_eligible.h"
+-
+-#include "rs/policy/eligibility_policy.h"
+-
+-namespace rs::util {
+-
+-void append_if_eligible(std::vector<model::Job>& output,
+-                        const model::Job& candidate) {
+-    if (policy::is_eligible(candidate)) {
+-        output.push_back(candidate);
+-    }
+-}
+-
+-}  // namespace rs::util

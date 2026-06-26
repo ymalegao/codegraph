@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fixture Author <fixture@example.invalid>
+Date: Thu, 25 Jun 2026 12:27:41 -0700
+Subject: [PATCH] drift: move and rename flush planner
+
+---
+ CMakeLists.txt                                            | 2 +-
+ include/rs/scheduler/{flush_planner.h => plan_composer.h} | 7 +++++--
+ src/scheduler/{flush_planner.cpp => plan_composer.cpp}    | 7 ++++---
+ src/scheduler/request_scheduler.cpp                       | 4 ++--
+ 4 files changed, 12 insertions(+), 8 deletions(-)
+ rename include/rs/scheduler/{flush_planner.h => plan_composer.h} (53%)
+ rename src/scheduler/{flush_planner.cpp => plan_composer.cpp} (80%)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 765a5e0..9ecbba4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -16,7 +16,7 @@ add_library(request_scheduler
+     src/policy/priority_policy.cpp
+     src/policy/tie_break_policy.cpp
+     src/scheduler/dispatcher.cpp
+-    src/scheduler/flush_planner.cpp
++    src/scheduler/plan_composer.cpp
+     src/scheduler/queue.cpp
+     src/scheduler/request_scheduler.cpp
+     src/util/append_if_eligible.cpp
+diff --git a/include/rs/scheduler/flush_planner.h b/include/rs/scheduler/plan_composer.h
+similarity index 53%
+rename from include/rs/scheduler/flush_planner.h
+rename to include/rs/scheduler/plan_composer.h
+index 929a3b3..f54af4f 100644
+--- a/include/rs/scheduler/flush_planner.h
++++ b/include/rs/scheduler/plan_composer.h
+@@ -8,7 +8,10 @@
+ 
+ namespace rs::scheduler {
+ 
+-model::FlushPlan build_flush_plan(std::vector<model::Job> jobs,
+-                                  const config::SchedulerConfig& config);
++class PlanComposer {
++public:
++    model::FlushPlan compose(std::vector<model::Job> jobs,
++                             const config::SchedulerConfig& config) const;
++};
+ 
+ }  // namespace rs::scheduler
+diff --git a/src/scheduler/flush_planner.cpp b/src/scheduler/plan_composer.cpp
+similarity index 80%
+rename from src/scheduler/flush_planner.cpp
+rename to src/scheduler/plan_composer.cpp
+index b695148..ebd96cd 100644
+--- a/src/scheduler/flush_planner.cpp
++++ b/src/scheduler/plan_composer.cpp
+@@ -1,4 +1,4 @@
+-#include "rs/scheduler/flush_planner.h"
++#include "rs/scheduler/plan_composer.h"
+ 
+ #include "rs/policy/batch_policy.h"
+ #include "rs/util/append_if_eligible.h"
+@@ -6,8 +6,9 @@
+ 
+ namespace rs::scheduler {
+ 
+-model::FlushPlan build_flush_plan(std::vector<model::Job> jobs,
+-                                  const config::SchedulerConfig& config) {
++model::FlushPlan PlanComposer::compose(
++    std::vector<model::Job> jobs,
++    const config::SchedulerConfig& config) const {
+     std::vector<model::Job> eligible;
+     eligible.reserve(jobs.size());
+     for (const auto& job : jobs) {
+diff --git a/src/scheduler/request_scheduler.cpp b/src/scheduler/request_scheduler.cpp
+index 2705b39..f86ba28 100644
+--- a/src/scheduler/request_scheduler.cpp
++++ b/src/scheduler/request_scheduler.cpp
+@@ -1,6 +1,6 @@
+ #include "rs/scheduler/request_scheduler.h"
+ 
+-#include "rs/scheduler/flush_planner.h"
++#include "rs/scheduler/plan_composer.h"
+ 
+ #include <utility>
+ 
+@@ -10,7 +10,7 @@ RequestScheduler::RequestScheduler(config::SchedulerConfig config)
+     : config_(config) {}
+ 
+ model::FlushPlan RequestScheduler::schedule(std::vector<model::Job> jobs) const {
+-    return build_flush_plan(std::move(jobs), config_);
++    return PlanComposer{}.compose(std::move(jobs), config_);
+ }
+ 
+ }  // namespace rs::scheduler

@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fixture Author <fixture@example.invalid>
+Date: Thu, 25 Jun 2026 12:28:24 -0700
+Subject: [PATCH] gold: enforce bounded priority batches
+
+---
+ CMakeLists.txt                     |  1 +
+ src/policy/batch_policy.cpp        | 10 +++++++---
+ tests/visible/batch_limit_test.cpp | 17 +++++++++++++++++
+ 3 files changed, 25 insertions(+), 3 deletions(-)
+ create mode 100644 tests/visible/batch_limit_test.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9ecbba4..5f8bc5e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -45,4 +45,5 @@ if(BUILD_TESTING)
+     add_visible_test(disabled_job_test)
+     add_visible_test(empty_queue_test)
+     add_visible_test(config_validation_test)
++    add_visible_test(batch_limit_test)
+ endif()
+diff --git a/src/policy/batch_policy.cpp b/src/policy/batch_policy.cpp
+index 181b302..f171271 100644
+--- a/src/policy/batch_policy.cpp
++++ b/src/policy/batch_policy.cpp
+@@ -1,15 +1,19 @@
+ #include "rs/policy/batch_policy.h"
+ 
++#include <algorithm>
++
+ namespace rs::policy {
+ 
+ bool batch_has_capacity(std::size_t selected_count, std::size_t limit) {
+     return limit == 0 || selected_count < limit;
+ }
+ 
+-std::size_t selectable_count(const config::SchedulerConfig&,
++std::size_t selectable_count(const config::SchedulerConfig& config,
+                              std::size_t eligible_count) {
+-    // Follow-up after priority correctness: enforce max_batch_size here.
+-    return eligible_count;
++    if (config.max_batch_size == 0) {
++        return eligible_count;
++    }
++    return std::min(config.max_batch_size, eligible_count);
+ }
+ 
+ }  // namespace rs::policy
+diff --git a/tests/visible/batch_limit_test.cpp b/tests/visible/batch_limit_test.cpp
+new file mode 100644
+index 0000000..f9c23da
+--- /dev/null
++++ b/tests/visible/batch_limit_test.cpp
+@@ -0,0 +1,17 @@
++#include "rs/scheduler/request_scheduler.h"
++#include "test_support.h"
++
++int main() {
++    rs::config::SchedulerConfig config;
++    config.max_batch_size = 2;
++    rs::scheduler::RequestScheduler scheduler(config);
++    const auto plan = scheduler.schedule({
++        {"low", 1, 0, true},
++        {"high", 9, 1, true},
++        {"middle", 4, 2, true},
++    });
++    require(plan.size() == 2, "batch limit bounds selected jobs");
++    require(plan.jobs()[0].job.id == "high", "batch keeps highest priority");
++    require(plan.jobs()[1].job.id == "middle", "batch keeps next priority");
++    return 0;
++}

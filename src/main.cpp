@@ -397,7 +397,7 @@ void expect_schema_objects(const codegraph::Storage& storage) {
         require(storage.object_exists("trigger", trigger), "missing sqlite trigger: " + std::string(trigger));
     }
 
-    require(storage.query_int("PRAGMA user_version;") == 2, "unexpected sqlite user_version");
+    require(storage.query_int("PRAGMA user_version;") == 3, "unexpected sqlite user_version");
 }
 
 
@@ -480,7 +480,7 @@ int command_doctor(const std::string* path) {
     storage.initialize_schema();
 
     std::vector<DoctorCheck> checks{
-        {"schema_user_version", storage.query_int("PRAGMA user_version;") == 2 ? 0 : 1},
+        {"schema_user_version", storage.query_int("PRAGMA user_version;") == 3 ? 0 : 1},
         {"dup_file_nodes",
          storage.query_int(
              "SELECT COUNT(*) - COUNT(DISTINCT title) FROM nodes WHERE kind = 'file';"
@@ -1059,6 +1059,48 @@ int command_memory_for(const std::string& target) {
     return 0;
 }
 
+int command_resume_context(const std::string* path) {
+    const std::filesystem::path repo_root = command_repo_root(path);
+    const std::filesystem::path codegraph_dir = repo_root / ".codegraph";
+    const std::filesystem::path db_path = codegraph_dir / "graph.sqlite";
+
+    codegraph::Storage storage(db_path);
+    codegraph::FrontendRegistry registry = make_frontend_registry();
+    (void)codegraph::bootstrap_repository(
+        storage,
+        registry,
+        repo_root,
+        codegraph_dir
+    );
+
+    const codegraph::GraphIndex graph = codegraph::build_graph_index(storage);
+    const codegraph::ResumeContext context =
+        codegraph::build_resume_context(storage, graph);
+
+    nlohmann::json affected = nlohmann::json::array();
+    for (const codegraph::AffectedNodeView& node : context.affected_nodes) {
+        affected.push_back({
+            {"node_id", codegraph::to_u32(node.node_id)},
+            {"kind", node.kind},
+            {"title", node.title},
+            {"path", node.path},
+            {"qualified_name", node.qualified_name},
+        });
+    }
+
+    const nlohmann::json result{
+        {"found", context.found},
+        {"handoff", context.handoff_body},
+        {"affected_nodes", affected},
+        {"unresolved_affects", context.unresolved_affects},
+    };
+    std::cout
+        << "CodeGraph verified resume context. This is prior-session state; "
+           "the current user request takes precedence.\n"
+        << result.dump(2) << "\n";
+    return 0;
+}
+
 uint32_t sql_direct_memory_count(codegraph::Storage& storage, int64_t target_node) {
     codegraph::Statement stmt(
         storage.handle(),
@@ -1416,6 +1458,44 @@ int command_test_index() {
             "indexer extracted Python symbols during C++ milestone"
         );
 
+        // Extractor changes must invalidate projections even when source bytes did
+        // not change. Corrupt one extracted row and mark the file as produced by
+        // an older extractor; an ordinary index run must restore it.
+        storage.execute(
+            "UPDATE symbols SET qualified_name = 'stale_anonymous_index_helper' "
+            "WHERE qualified_name = 'anonymous_index_helper' AND file_id = "
+            "(SELECT file_id FROM files WHERE path = "
+            "'testing/codegraph_anonymous_tmp.cpp');"
+            "UPDATE files SET projection_version = 0 "
+            "WHERE path = 'testing/codegraph_anonymous_tmp.cpp';"
+        );
+        const codegraph::IndexResult projection_refresh =
+            codegraph::index_repository(
+                storage,
+                registry,
+                codegraph::IndexOptions{repo_root}
+            );
+        require(
+            projection_refresh.files_indexed >= 1,
+            "indexer did not refresh an old source projection version"
+        );
+        require(
+            storage.query_int(
+                "SELECT COUNT(*) FROM symbols "
+                "WHERE qualified_name = 'anonymous_index_helper' AND file_id = "
+                "(SELECT file_id FROM files WHERE path = "
+                "'testing/codegraph_anonymous_tmp.cpp');"
+            ) == 1,
+            "projection refresh did not restore anonymous namespace extraction"
+        );
+        require(
+            storage.query_int(
+                "SELECT COUNT(*) FROM symbols "
+                "WHERE qualified_name = 'stale_anonymous_index_helper';"
+            ) == 0,
+            "projection refresh left stale extracted symbols"
+        );
+
         const std::filesystem::path prune_file = repo_root / "testing" / "codegraph_prune_tmp.cpp";
         RemoveOnExit remove_prune_file{prune_file};
         write_file(
@@ -1457,6 +1537,65 @@ int command_test_index() {
             "scanner left stale FTS symbols after deletion"
         );
         (void)codegraph::index_repository(storage, registry, codegraph::IndexOptions{repo_root});
+
+        // Changing repo_id used to duplicate every file/symbol node because it is
+        // part of the stable ID. The scanner must remove the old source graph,
+        // force a projection rebuild, and let affected memories re-resolve.
+        storage.execute(
+            "INSERT INTO nodes(stable_id, kind, title, created_at, status) VALUES "
+            "('memory:test-repo-id-drift', 'arch_decision', 'repo id drift', "
+            "'2026-01-01T00:00:00Z', 'active');"
+            "INSERT INTO edges(from_node, to_node, to_ref, kind, resolved) "
+            "SELECT "
+            "(SELECT node_id FROM nodes WHERE stable_id = 'memory:test-repo-id-drift'), "
+            "(SELECT node_id FROM nodes WHERE stable_id = "
+            "'file:local:testing/codegraph_anonymous_tmp.cpp'), "
+            "'testing/codegraph_anonymous_tmp.cpp', 'affects', 1;"
+        );
+        (void)codegraph::scan_repository(
+            storage,
+            registry,
+            codegraph::ScanOptions{repo_root, "renamed"}
+        );
+        (void)codegraph::index_repository(
+            storage,
+            registry,
+            codegraph::IndexOptions{repo_root, "renamed"}
+        );
+        require(
+            storage.query_int(
+                "SELECT COUNT(*) - COUNT(DISTINCT title) "
+                "FROM nodes WHERE kind = 'file';"
+            ) == 0,
+            "repo_id change left duplicate file nodes"
+        );
+        require(
+            storage.query_int(
+                "SELECT COUNT(*) FROM nodes "
+                "WHERE stable_id LIKE 'file:local:%' "
+                "OR stable_id LIKE 'symbol:local:%';"
+            ) == 0,
+            "repo_id change left old source nodes"
+        );
+        require(
+            storage.query_int(
+                "SELECT COUNT(*) FROM symbols "
+                "WHERE qualified_name = 'anonymous_index_helper';"
+            ) == 1,
+            "repo_id change did not rebuild symbol graph projection"
+        );
+        require(
+            storage.query_int(
+                "SELECT COUNT(*) FROM edges e "
+                "JOIN nodes n ON n.node_id = e.to_node "
+                "WHERE e.from_node = (SELECT node_id FROM nodes "
+                "WHERE stable_id = 'memory:test-repo-id-drift') "
+                "AND e.kind = 'affects' AND e.resolved = 1 "
+                "AND n.stable_id = "
+                "'file:renamed:testing/codegraph_anonymous_tmp.cpp';"
+            ) == 1,
+            "repo_id change did not re-resolve memory affects edge"
+        );
     }
 
     std::filesystem::remove(db_path, ignored);
@@ -1466,6 +1605,8 @@ int command_test_index() {
     std::cout << "index fts: ok\n";
     std::cout << "index edges: ok\n";
     std::cout << "delete prune: ok\n";
+    std::cout << "projection invalidation: ok\n";
+    std::cout << "repo id drift cleanup: ok\n";
     std::cout << "indexed_files: " << index_result.files_indexed << "\n";
     std::cout << "index_files_pruned: " << index_result.files_pruned << "\n";
     std::cout << "symbols_indexed: " << index_result.symbols_indexed << "\n";
@@ -2375,6 +2516,7 @@ void print_usage() {
         << "  codegraph correct --reason R --affects P [--prefer G] [--avoid G]\n"
         << "  codegraph materialize\n"
         << "  codegraph memory-for <path-or-symbol>\n"
+        << "  codegraph resume-context [path]\n"
         << "  codegraph bench lookup|memory-for|read <target> [repetitions]\n"
         << "  codegraph bench index [repetitions]\n"
         << "  codegraph parse-smoke <path>\n"
@@ -2486,6 +2628,11 @@ int main(int argc, char** argv) {
 
         if (argc == 3 && std::strcmp(argv[1], "memory-for") == 0) {
             return command_memory_for(argv[2]);
+        }
+
+        if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "resume-context") == 0) {
+            const std::string path = argc == 3 ? argv[2] : "";
+            return command_resume_context(argc == 3 ? &path : nullptr);
         }
 
         if (argc >= 3 && std::strcmp(argv[1], "bench") == 0) {

@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS files (
   size_bytes   INTEGER NOT NULL,
   line_count   INTEGER NOT NULL,
   commit_hash  TEXT,
-  indexed_at   TEXT NOT NULL
+  indexed_at   TEXT NOT NULL,
+  projection_version INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS line_tables (
@@ -149,7 +150,7 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
   VALUES (new.memory_id, new.title, new.body);
 END;
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 )sql";
 
 }  // namespace
@@ -165,6 +166,14 @@ Storage::Storage(const std::filesystem::path& db_path) {
         throw std::runtime_error(message);
     }
 
+    // Hooks and MCP startup can briefly overlap while bootstrapping the same
+    // repository. Wait for the writer instead of surfacing a transient
+    // SQLITE_BUSY as a failed tool or failed automatic resume.
+    check_sqlite(
+        sqlite3_busy_timeout(db_, 5000),
+        db_,
+        "configure sqlite busy timeout"
+    );
     execute("PRAGMA foreign_keys = ON;");
 }
 
@@ -192,8 +201,12 @@ Storage& Storage::operator=(Storage&& other) noexcept {
 void Storage::initialize_schema() {
     const int64_t version = query_int("PRAGMA user_version;");
     const bool needs_v2_migration = version >= 1 && version < 2;
+    const bool needs_v3_migration = version >= 1 && version < 3;
     if (needs_v2_migration) {
         migrate_v1_to_v2();
+    }
+    if (needs_v3_migration) {
+        migrate_v2_to_v3();
     }
     execute(kSchemaSql);
     if (needs_v2_migration) {
@@ -214,6 +227,20 @@ void Storage::migrate_v1_to_v2() {
         query_int("SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'body';") > 0;
     if (!has_body) {
         execute("ALTER TABLE symbols ADD COLUMN body TEXT;");
+    }
+}
+
+void Storage::migrate_v2_to_v3() {
+    const bool has_projection_version =
+        query_int(
+            "SELECT COUNT(*) FROM pragma_table_info('files') "
+            "WHERE name = 'projection_version';"
+        ) > 0;
+    if (!has_projection_version) {
+        execute(
+            "ALTER TABLE files ADD COLUMN projection_version "
+            "INTEGER NOT NULL DEFAULT 0;"
+        );
     }
 }
 

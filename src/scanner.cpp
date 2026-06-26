@@ -348,6 +348,17 @@ ScanResult scan_repository(
 
     storage.execute("BEGIN IMMEDIATE;");
     try {
+        const uint32_t foreign_source_nodes =
+            prune_source_nodes_for_other_repositories(
+            storage.handle(),
+            options.repo_id
+        );
+        if (foreign_source_nodes > 0) {
+            // Source node stable IDs include repo_id. If that identity changes,
+            // the symbol rows may still match the file hash but their graph nodes
+            // were just removed, so force one full projection rebuild.
+            storage.execute("UPDATE files SET projection_version = 0;");
+        }
         for (std::filesystem::recursive_directory_iterator it(
                  repo_root,
                  std::filesystem::directory_options::skip_permission_denied);
@@ -438,7 +449,9 @@ ScanResult scan_repository(
         (void)resolver_pass(storage);
         storage.execute("COMMIT;");
     } catch (...) {
-        storage.execute("ROLLBACK;");
+        if (sqlite3_get_autocommit(storage.handle()) == 0) {
+            storage.execute("ROLLBACK;");
+        }
         throw;
     }
 

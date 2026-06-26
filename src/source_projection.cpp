@@ -1,5 +1,7 @@
 #include "source_projection.h"
 
+#include <vector>
+
 #include "sqlite_util.h"
 
 namespace codegraph {
@@ -48,6 +50,62 @@ bool parse_symbol_stable_id(std::string_view stable_id, SymbolStableIdParts& par
     parts.path = std::string(stable_id.substr(path_start, path_end - path_start));
     parts.qualified_name = std::string(stable_id.substr(path_end + 2U));
     return !parts.repo_id.empty() && !parts.path.empty() && !parts.qualified_name.empty();
+}
+
+uint32_t prune_source_nodes_for_other_repositories(
+    sqlite3* db,
+    std::string_view repo_id
+) {
+    Statement select_nodes(
+        db,
+        "SELECT node_id, stable_id, kind, title FROM nodes "
+        "WHERE kind IN ('file', 'symbol') ORDER BY node_id;"
+    );
+    std::vector<int64_t> stale_nodes;
+    while (select_nodes.step()) {
+        const int64_t node_id = sqlite3_column_int64(select_nodes.get(), 0);
+        const std::string stable_id = column_text(select_nodes.get(), 1);
+        const std::string kind = column_text(select_nodes.get(), 2);
+        const std::string title = column_text(select_nodes.get(), 3);
+
+        bool stale = false;
+        if (kind == "file") {
+            stale = stable_id != file_stable_id(repo_id, title);
+        } else {
+            SymbolStableIdParts parts;
+            stale = parse_symbol_stable_id(stable_id, parts) && parts.repo_id != repo_id;
+        }
+        if (stale) {
+            stale_nodes.push_back(node_id);
+        }
+    }
+
+    Statement reset_affects(
+        db,
+        "UPDATE edges SET to_node = NULL, resolved = 0 "
+        "WHERE kind = 'affects' AND to_node = ?;"
+    );
+    Statement delete_edges(
+        db,
+        "DELETE FROM edges WHERE from_node = ? OR to_node = ?;"
+    );
+    Statement delete_node(db, "DELETE FROM nodes WHERE node_id = ?;");
+
+    for (const int64_t node_id : stale_nodes) {
+        reset_affects.reset();
+        bind_int64(reset_affects.get(), 1, node_id);
+        reset_affects.expect_done("reset affects to foreign-repository source node");
+
+        delete_edges.reset();
+        bind_int64(delete_edges.get(), 1, node_id);
+        bind_int64(delete_edges.get(), 2, node_id);
+        delete_edges.expect_done("delete edges for foreign-repository source node");
+
+        delete_node.reset();
+        bind_int64(delete_node.get(), 1, node_id);
+        delete_node.expect_done("delete foreign-repository source node");
+    }
+    return static_cast<uint32_t>(stale_nodes.size());
 }
 
 void delete_source_file_projection(

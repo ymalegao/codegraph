@@ -1,0 +1,55 @@
+-- The CXX compiler identification is GNU 11.4.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /tmp/tmp.TWsyI4x4qS/build
+[1/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/config/scheduler_config.cpp.o
+[2/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/policy/eligibility_gate.cpp.o
+[3/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/model/scheduled_job.cpp.o
+[4/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/model/job.cpp.o
+[5/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/policy/eligibility_policy.cpp.o
+[6/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/util/id.cpp.o
+[7/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/policy/priority_policy.cpp.o
+[8/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/policy/tie_break_policy.cpp.o
+[9/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/policy/batch_policy.cpp.o
+[10/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/model/flush_plan.cpp.o
+[11/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/scheduler/request_scheduler.cpp.o
+[12/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/scheduler/dispatcher.cpp.o
+[13/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/scheduler/plan_composer.cpp.o
+[14/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/scheduler/queue.cpp.o
+[15/30] Building CXX object CMakeFiles/regression_hidden_test.dir/regression_hidden_test.cpp.o
+[16/30] Building CXX object CMakeFiles/unlimited_batch_hidden_test.dir/unlimited_batch_hidden_test.cpp.o
+[17/30] Building CXX object fixture-build/CMakeFiles/scheduler_demo.dir/app/scheduler_demo.cpp.o
+[18/30] Building CXX object CMakeFiles/batch_limit_hidden_test.dir/batch_limit_hidden_test.cpp.o
+[19/30] Building CXX object CMakeFiles/background_deferral_hidden_test.dir/background_deferral_hidden_test.cpp.o
+[20/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/util/vector_ops.cpp.o
+[21/30] Building CXX object CMakeFiles/invariant_matrix_hidden_test.dir/invariant_matrix_hidden_test.cpp.o
+[22/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/util/validation.cpp.o
+[23/30] Building CXX object fixture-build/CMakeFiles/request_scheduler.dir/src/util/stable_order.cpp.o
+[24/30] Linking CXX static library fixture-build/librequest_scheduler.a
+[25/30] Linking CXX executable invariant_matrix_hidden_test
+[26/30] Linking CXX executable fixture-build/scheduler_demo
+[27/30] Linking CXX executable background_deferral_hidden_test
+[28/30] Linking CXX executable batch_limit_hidden_test
+[29/30] Linking CXX executable unlimited_batch_hidden_test
+[30/30] Linking CXX executable regression_hidden_test
+Internal ctest changing into directory: /tmp/tmp.TWsyI4x4qS/build
+Test project /tmp/tmp.TWsyI4x4qS/build
+    Start 1: invariant_matrix_hidden_test
+1/5 Test #1: invariant_matrix_hidden_test ......   Passed    0.00 sec
+    Start 2: batch_limit_hidden_test
+2/5 Test #2: batch_limit_hidden_test ...........   Passed    0.00 sec
+    Start 3: unlimited_batch_hidden_test
+3/5 Test #3: unlimited_batch_hidden_test .......   Passed    0.00 sec
+    Start 4: background_deferral_hidden_test
+4/5 Test #4: background_deferral_hidden_test ...   Passed    0.00 sec
+    Start 5: regression_hidden_test
+5/5 Test #5: regression_hidden_test ............   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =   0.02 sec

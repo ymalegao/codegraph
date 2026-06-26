@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "file_util.h"
+#include "resolver.h"
 #include "source_projection.h"
 #include "sqlite_util.h"
 #include "time_util.h"
@@ -19,6 +20,7 @@ struct FileRow {
     std::string path;
     std::string content_hash;
     std::string commit_hash;
+    int64_t projection_version = 0;
 };
 
 struct IndexedSymbol {
@@ -29,7 +31,7 @@ struct IndexedSymbol {
 std::vector<FileRow> load_files_for_language(sqlite3* db, std::string_view language) {
     Statement stmt(
         db,
-        "SELECT file_id, path, content_hash, COALESCE(commit_hash, '') "
+        "SELECT file_id, path, content_hash, COALESCE(commit_hash, ''), projection_version "
         "FROM files WHERE language = ? ORDER BY path;"
     );
     bind_text(stmt.get(), 1, language);
@@ -41,6 +43,7 @@ std::vector<FileRow> load_files_for_language(sqlite3* db, std::string_view langu
             column_text(stmt.get(), 1),
             column_text(stmt.get(), 2),
             column_text(stmt.get(), 3),
+            sqlite3_column_int64(stmt.get(), 4),
         });
     }
     return files;
@@ -143,7 +146,8 @@ bool source_projection_is_current(sqlite3* db, const FileRow& file) {
     bind_int64(stmt.get(), 1, file.file_id);
     bind_text(stmt.get(), 2, file.content_hash);
     stmt.expect_row("count current symbols");
-    return sqlite3_column_int64(stmt.get(), 0) > 0;
+    return file.projection_version == kSourceProjectionVersion &&
+           sqlite3_column_int64(stmt.get(), 0) > 0;
 }
 
 }  // namespace
@@ -173,6 +177,10 @@ IndexResult index_repository(
         storage.handle(),
         "INSERT INTO edges(from_node, to_node, to_ref, kind, resolved) "
         "VALUES (?, ?, ?, ?, ?);"
+    );
+    Statement mark_projection_current(
+        storage.handle(),
+        "UPDATE files SET projection_version = ? WHERE file_id = ?;"
     );
 
     IndexResult result;
@@ -272,13 +280,25 @@ IndexResult index_repository(
                     ++result.imports_edges;
                 }
 
+                mark_projection_current.reset();
+                bind_int64(
+                    mark_projection_current.get(),
+                    1,
+                    kSourceProjectionVersion
+                );
+                bind_int64(mark_projection_current.get(), 2, file.file_id);
+                mark_projection_current.expect_done("mark source projection current");
+
                 ++result.files_indexed;
             }
         }
 
+        (void)resolver_pass(storage);
         storage.execute("COMMIT;");
     } catch (...) {
-        storage.execute("ROLLBACK;");
+        if (sqlite3_get_autocommit(storage.handle()) == 0) {
+            storage.execute("ROLLBACK;");
+        }
         throw;
     }
 

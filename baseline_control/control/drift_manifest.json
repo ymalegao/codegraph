@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "fixture_base_commit": "3d1cda6",
+  "drifts": [
+    {
+      "id": "drift-1",
+      "patch": "drifts/drift-1.patch",
+      "description": "Move the primary planner and rename the primary symbol without changing behavior.",
+      "removed_paths": [
+        "include/rs/scheduler/flush_planner.h",
+        "src/scheduler/flush_planner.cpp"
+      ],
+      "removed_symbols": [
+        "build_flush_plan",
+        "rs::scheduler::build_flush_plan"
+      ],
+      "renamed_symbols": [
+        {
+          "from": "rs::scheduler::build_flush_plan",
+          "to": "rs::scheduler::PlanComposer::compose"
+        }
+      ],
+      "moved_paths": [
+        {
+          "from": "include/rs/scheduler/flush_planner.h",
+          "to": "include/rs/scheduler/plan_composer.h"
+        },
+        {
+          "from": "src/scheduler/flush_planner.cpp",
+          "to": "src/scheduler/plan_composer.cpp"
+        }
+      ]
+    },
+    {
+      "id": "drift-2",
+      "patch": "drifts/drift-2.patch",
+      "description": "Delete the append helper, fold eligibility into a gate, and relocate the background config rule.",
+      "removed_paths": [
+        "include/rs/config/config_rules.h",
+        "include/rs/util/append_if_eligible.h",
+        "src/config/config_rules.cpp",
+        "src/util/append_if_eligible.cpp"
+      ],
+      "removed_symbols": [
+        "append_if_eligible",
+        "background_is_allowed",
+        "rs::util::append_if_eligible",
+        "rs::config::background_is_allowed"
+      ],
+      "renamed_symbols": [
+        {
+          "from": "rs::util::append_if_eligible",
+          "to": "rs::policy::EligibilityGate::allow"
+        },
+        {
+          "from": "rs::config::background_is_allowed",
+          "to": "rs::policy::EligibilityGate::allow"
+        }
+      ],
+      "moved_paths": [
+        {
+          "from": "include/rs/config/config_rules.h",
+          "to": "include/rs/policy/eligibility_gate.h"
+        },
+        {
+          "from": "src/config/config_rules.cpp",
+          "to": "src/policy/eligibility_gate.cpp"
+        },
+        {
+          "from": "include/rs/util/append_if_eligible.h",
+          "to": "include/rs/policy/eligibility_gate.h"
+        },
+        {
+          "from": "src/util/append_if_eligible.cpp",
+          "to": "src/policy/eligibility_gate.cpp"
+        }
+      ]
+    }
+  ]
+}

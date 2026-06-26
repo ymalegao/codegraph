@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fixture Author <fixture@example.invalid>
+Date: Thu, 25 Jun 2026 12:28:47 -0700
+Subject: [PATCH] gold: enforce interactive background deferral
+
+---
+ CMakeLists.txt                             |  1 +
+ src/policy/eligibility_gate.cpp            | 13 +++++++++----
+ tests/visible/background_deferral_test.cpp | 20 ++++++++++++++++++++
+ 3 files changed, 30 insertions(+), 4 deletions(-)
+ create mode 100644 tests/visible/background_deferral_test.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c074d9e..e6d10dc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -45,4 +45,5 @@ if(BUILD_TESTING)
+     add_visible_test(empty_queue_test)
+     add_visible_test(config_validation_test)
+     add_visible_test(batch_limit_test)
++    add_visible_test(background_deferral_test)
+ endif()
+diff --git a/src/policy/eligibility_gate.cpp b/src/policy/eligibility_gate.cpp
+index 567c740..ab0f449 100644
+--- a/src/policy/eligibility_gate.cpp
++++ b/src/policy/eligibility_gate.cpp
+@@ -9,10 +9,15 @@ EligibilityGate::EligibilityGate(const config::SchedulerConfig& config,
+     : config_(config), has_interactive_job_(has_interactive_job) {}
+ 
+ bool EligibilityGate::allow(const model::Job& job) const {
+-    (void)config_;
+-    (void)has_interactive_job_;
+-    // Remaining task: enforce the relocated background deferral rule here.
+-    return is_eligible(job);
++    if (!is_eligible(job)) {
++        return false;
++    }
++    if (config_.defer_background_when_interactive &&
++        has_interactive_job_ &&
++        job.priority == 0) {
++        return false;
++    }
++    return true;
+ }
+ 
+ }  // namespace rs::policy
+diff --git a/tests/visible/background_deferral_test.cpp b/tests/visible/background_deferral_test.cpp
+new file mode 100644
+index 0000000..fa94aa6
+--- /dev/null
++++ b/tests/visible/background_deferral_test.cpp
+@@ -0,0 +1,20 @@
++#include "rs/scheduler/request_scheduler.h"
++#include "test_support.h"
++
++int main() {
++    rs::config::SchedulerConfig config;
++    config.defer_background_when_interactive = true;
++    rs::scheduler::RequestScheduler scheduler(config);
++
++    const auto mixed = scheduler.schedule({
++        {"background", 0, 0, true},
++        {"interactive", 5, 1, true},
++    });
++    require(mixed.size() == 1, "background work is deferred");
++    require(mixed.jobs()[0].job.id == "interactive",
++            "interactive work remains schedulable");
++
++    require(scheduler.schedule({{"background", 0, 0, true}}).size() == 1,
++            "background-only queues still make progress");
++    return 0;
++}

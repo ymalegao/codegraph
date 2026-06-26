@@ -31,6 +31,9 @@ private:
     // Migrate a v1 schema to v2: add symbols.body and rebuild fts_symbols so it
     // indexes bodies. Bodies stay empty until the next reindex repopulates them.
     void migrate_v1_to_v2();
+    // Migrate a v2 schema to v3: track the extractor/projection version used for
+    // each file so extractor changes invalidate otherwise unchanged source.
+    void migrate_v2_to_v3();
 
     sqlite3* db_ = nullptr;
 };

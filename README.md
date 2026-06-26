@@ -50,6 +50,51 @@ The MCP server also self-bootstraps:
 
 If `.codegraph` is missing or the database is empty, `mcp` performs the same initialization before serving tools.
 
+## MCP Protocol Smoke Benchmark
+
+Run the low-level protocol benchmark against a disposable fixture:
+
+```sh
+python3 benchmarks/mcp_benchmark.py
+```
+
+The JSON report defaults to `build/mcp-benchmark.json`. It verifies that the
+complete MCP tool surface is advertised, fails immediately on any tool error,
+and records per-scenario success, p50/p95/max latency, wire/content bytes, and
+an estimated content-token count. The token figure is explicitly an estimate
+(`ceil(characters / 4)` by default); raw byte counts are retained so a chosen
+model tokenizer can be applied later.
+
+This is a transport/reliability smoke test, not the product benchmark. It does
+not demonstrate the value of verified resume. The task-based, cross-session
+experiment is specified in
+[`docs/verified_resume_experiment.md`](docs/verified_resume_experiment.md).
+
+Useful options:
+
+```sh
+python3 benchmarks/mcp_benchmark.py \
+  --repetitions 100 \
+  --warmup 5 \
+  --chars-per-token 4 \
+  --output build/mcp-benchmark.json
+```
+
+## Agent Lifecycle Hooks
+
+The repository includes shared Codex and Claude Code lifecycle hooks. They
+inject verified resume context at session start, refresh after mutations, and
+require a semantic handoff before stopping with unhanded-off changes.
+
+See [`docs/agent_session_lifecycle.md`](docs/agent_session_lifecycle.md) for the
+design and limitations.
+
+Validate the hook state machine with:
+
+```sh
+python3 testing/session_hook_smoke.py
+```
+
 ## Agent Usage
 
 `CLAUDE.md` and `AGENTS.md` describe the intended tool policy for agents. The short version is: use CodeGraph read tools for exact symbol/file reads and memory, and let hooks or `mcp` bootstrap keep the index current.

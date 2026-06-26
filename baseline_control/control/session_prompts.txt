@@ -1,0 +1,8 @@
+SESSION 1
+Diagnose the failing scheduling behavior, identify the invariant being violated, implement the safest first part of the fix, and leave the remaining follow-up for the next session.
+
+SESSION 2
+Continue the previous work. Add the remaining edge-case behavior and tests, preserving the invariant already identified.
+
+SESSION 3
+Finish the task from the previous session, resolve any remaining issue, and run the relevant verification.
